@@ -25,7 +25,7 @@ def test_configuration_and_old_student_endpoint_closed(booth, monkeypatch):
     assert config["google_client_id"] == "test-client.apps.googleusercontent.com"
     assert config["school_domain"] == "ksa.hs.kr"
     assert config["guest_session_hours"] == 12
-    error(client.post("/api/session", json={"kind": "STUDENT", "student_id": "23-103",
+    error(client.post("/api/session", json={"kind": "STUDENT", "student_id": "00-000",
         "real_name": "등록이름", "nickname": "별명", "consent": True}), "GOOGLE_LOGIN_REQUIRED")
     monkeypatch.delenv("GOOGLE_CLIENT_ID")
     assert ok(client.get("/api/auth/config"))["configured"] is False
@@ -66,11 +66,11 @@ def test_challenge_expires_and_replacement_invalidates_previous(booth):
 
 
 @pytest.mark.parametrize("claims", [
-    {"email": "23-103@gmail.com"},
-    {"email": "23-103@ksa.hs.kr.attacker.example"},
+    {"email": "00-000@gmail.com"},
+    {"email": "00-000@ksa.hs.kr.attacker.example"},
     {"email": "student@ksa.hs.kr"},
-    {"email": "23-103+alias@ksa.hs.kr"},
-    {"email": "２３-１０３@ksa.hs.kr"},
+    {"email": "00-000+alias@ksa.hs.kr"},
+    {"email": "００-０００@ksa.hs.kr"},
     {"email_verified": False},
     {"email_verified": "true"},
     {"hd": "attacker.example"},
@@ -105,23 +105,23 @@ def test_unusable_token_claims_never_create_accounts(booth, claims):
 
 def test_identity_and_name_come_from_token_not_request(booth):
     client = booth.client()
-    credential = booth.google_token(client, name="학교등록이름", student_id="23-103")
+    credential = booth.google_token(client, name="학교등록이름", student_id="00-000")
     result = ok(google_login(client, credential, nickname="허위별명", real_name="허위실명",
         email="99-999@ksa.hs.kr", student_id="99-999", sub="attacker"))
     assert result["nickname"] == "학교등록이름"
     from server import db
     with db.transaction() as c:
         p = c.one("SELECT * FROM participants WHERE id=?", (result["participant_id"],))
-        assert p["student_id"] == "23-103"
+        assert p["student_id"] == "00-000"
         assert p["real_name"] == "학교등록이름"
         identity = c.one("SELECT * FROM school_identities WHERE participant_id=?", (p["id"],))
-        assert identity["school_email"] == "23-103@ksa.hs.kr"
-        assert identity["google_sub"] == "google-sub-23-103"
+        assert identity["school_email"] == "00-000@ksa.hs.kr"
+        assert identity["google_sub"] == "google-sub-00-000"
 
 
 def test_duplicate_real_names_and_public_name_refresh(booth):
     booth.open()
-    a, ra = booth.student(name="동명이인", student_id="23-103")
+    a, ra = booth.student(name="동명이인", student_id="00-000")
     b, rb = booth.student(name="동명이인", student_id="24-103")
     aid, bid = ok(ra)["participant_id"], ok(rb)["participant_id"]
     assert aid != bid
@@ -129,17 +129,17 @@ def test_duplicate_real_names_and_public_name_refresh(booth):
     ok(booth.submit(b))
     rows = ok(a.get("/api/scoreboard"))["rankings"]
     assert sum(r["nickname"] == "동명이인" for r in rows) == 2
-    _, updated = booth.student(name="새등록이름", student_id="23-103")
+    _, updated = booth.student(name="새등록이름", student_id="00-000")
     assert ok(updated)["participant_id"] == aid
     rows = ok(a.get("/api/scoreboard"))["rankings"]
     assert next(r["nickname"] for r in rows if r["participant_id"] == aid) == "새등록이름"
 
 
 def test_verified_email_cannot_be_rebound_to_another_google_sub(booth):
-    first, response = booth.student(student_id="23-103")
+    first, response = booth.student(student_id="00-000")
     identity = ok(response)
     attacker = booth.client()
-    credential = booth.google_token(attacker, student_id="23-103", sub="different-google-sub")
+    credential = booth.google_token(attacker, student_id="00-000", sub="different-google-sub")
     error(google_login(attacker, credential), "ACCOUNT_CONFLICT")
     assert ok(first.get("/api/state"))["participant_id"] == identity["participant_id"]
 
@@ -152,7 +152,7 @@ def test_legacy_migration_preserves_attempts_rewards_and_revokes_old_cookie(boot
     submitted = ok(booth.submit(legacy))
     with db.transaction(write=True) as c:
         c.execute("UPDATE participants SET kind='STUDENT',student_id=?,real_name=? WHERE id=?",
-                  ("23-103", "예전미인증실명", participant_id))
+                  ("00-000", "예전미인증실명", participant_id))
         c.execute("UPDATE sessions SET role='PLAYER' WHERE participant_id=?", (participant_id,))
         db.set_config(c, "board_cache", "{}")
     assert ok(legacy.get("/api/state"))["participant_id"] is None
@@ -160,7 +160,7 @@ def test_legacy_migration_preserves_attempts_rewards_and_revokes_old_cookie(boot
     before = ok(legacy.get("/api/scoreboard"))
     assert "예전미인증실명" not in json.dumps(before, ensure_ascii=False)
     assert before["rankings"][0]["nickname"] == "예전공개별명"
-    verified, response = booth.student(name="학교에서받은이름", student_id="23-103")
+    verified, response = booth.student(name="학교에서받은이름", student_id="00-000")
     result = ok(response)
     assert result["participant_id"] == participant_id
     assert result["nickname"] == "학교에서받은이름"
@@ -178,7 +178,7 @@ def test_legacy_migration_preserves_attempts_rewards_and_revokes_old_cookie(boot
     people = ok(booth.admin.get("/api/admin/participants"))["items"]
     assert people[0]["nickname"] == "학교에서받은이름"
     dumped = json.dumps([after, claims, people], ensure_ascii=False)
-    assert "23-103" not in dumped and "ksa.hs.kr" not in dumped
+    assert "00-000" not in dumped and "ksa.hs.kr" not in dumped
     assert "google-sub-" not in dumped
 
 
@@ -243,7 +243,7 @@ def test_frozen_rank_names_refresh_and_hide_without_identity_export(booth):
     assert current["rankings"][0]["points"] == frozen["rankings"][0]["points"]
     # The route is operational anonymous JSON, not a credentials backup.
     exported_text = json.dumps(ok(booth.admin.get("/api/admin/backup")), ensure_ascii=False)
-    for private in ("첫등록이름", "바뀐등록이름", "23-103", "ksa.hs.kr", "google-sub-23-103"):
+    for private in ("첫등록이름", "바뀐등록이름", "00-000", "ksa.hs.kr", "google-sub-00-000"):
         assert private not in exported_text
     ok(booth.admin.post(f"/api/admin/participants/{participant_id}/hide", json={"reason": "공개 표시 가리기 테스트"}))
     assert ok(student.get("/api/hall?scope=DAY1"))["rankings"][0]["nickname"] == "익명 전술가"
@@ -266,7 +266,7 @@ def test_old_sqlite_schema_is_upgraded_without_replacing_participants(tmp_path, 
           token_hash TEXT PRIMARY KEY,participant_id TEXT,role TEXT NOT NULL,
           expires_at TEXT NOT NULL,created_at TEXT NOT NULL);
         INSERT INTO participants(id,kind,student_id,real_name,nickname)
-          VALUES('legacy-owner','STUDENT','23-103','기존미확인실명','기존별명');
+          VALUES('legacy-owner','STUDENT','00-000','기존미확인실명','기존별명');
         """)
     db.initialize(force=True)
     with db.transaction() as c:
@@ -300,8 +300,8 @@ def test_auth_cookies_are_http_only_secure_on_https(booth):
         token = "secure-cookie-fixture"
         booth.credentials[token] = {
             "aud": "test-client.apps.googleusercontent.com", "iss": "https://accounts.google.com",
-            "exp": int(time.time()) + 600, "iat": int(time.time()), "sub": "google-sub-23-103",
-            "hd": "ksa.hs.kr", "email": "23-103@ksa.hs.kr", "email_verified": True,
+            "exp": int(time.time()) + 600, "iat": int(time.time()), "sub": "google-sub-00-000",
+            "hd": "ksa.hs.kr", "email": "00-000@ksa.hs.kr", "email_verified": True,
             "name": "학교등록이름", "nonce": nonce,
         }
         response = google_login(client, token)
@@ -339,8 +339,8 @@ def signed_google_token(monkeypatch):
     def encoded(raw): return base64.urlsafe_b64encode(raw).rstrip(b"=")
     def make(changes=None, wrong_key=False):
         claims = {"iss": "https://accounts.google.com", "aud": "test-client.apps.googleusercontent.com",
-            "sub": "google-sub-23-103", "iat": int(time.time()), "exp": int(time.time()) + 600,
-            "email": "23-103@ksa.hs.kr", "email_verified": True, "hd": "ksa.hs.kr", "name": "학교등록이름"}
+            "sub": "google-sub-00-000", "iat": int(time.time()), "exp": int(time.time()) + 600,
+            "email": "00-000@ksa.hs.kr", "email_verified": True, "hd": "ksa.hs.kr", "name": "학교등록이름"}
         if changes: claims.update(changes)
         signing = encoded(json.dumps({"alg": "RS256", "kid": "test-key"}).encode()) + b"." + encoded(json.dumps(claims).encode())
         signer = rsa.generate_private_key(public_exponent=65537, key_size=2048) if wrong_key else key
@@ -353,7 +353,7 @@ def test_real_verifier_accepts_signed_token_with_bounded_network(signed_google_t
     from server.google_auth import verify_credential
     make, fetches = signed_google_token
     result = verify_credential(make(), "test-client.apps.googleusercontent.com")
-    assert result["sub"] == "google-sub-23-103"
+    assert result["sub"] == "google-sub-00-000"
     assert fetches and all(call[1]["timeout"] == (3, 7) for call in fetches)
 
 

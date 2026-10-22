@@ -4,6 +4,10 @@
 
 ## 자동 검증
 
+### 로그인 안내의 학번 예시 제거 · 2026-10-22
+
+로그인 화면의 구체적인 학번 예시를 `학번@ksa.hs.kr`로 바꾸고 문서·테스트 자료의 예시도 교체했습니다. 정적 자산 버전은 `school-auth-20261022-r2`로 맞췄습니다. 인증 로직은 변경하지 않았습니다. JavaScript 구문 검사와 인증·백엔드 검사 **62 passed, 1 deselected**를 확인했습니다. 제외 항목은 기존 성능 시험입니다.
+
 ### 학교 Google 로그인 전환 · 2026-10-22
 
 명령: `python3 -m pytest tests -q -k 'not 30_concurrent'` — **91 passed, 1 deselected, 1 warning**, 8.58초. 제외한 항목은 기존 30명 동시 제출 성능 벤치마크이며, 인증 변경 검증을 위해 기존 부하 시험을 반복하지 않았습니다. 경고는 기존 Starlette/httpx 사용 중단 예정 안내입니다. `node --check public/app.js`, `node --check public/admin.js`와 Vercel 설정 JSON 검사도 통과했습니다.

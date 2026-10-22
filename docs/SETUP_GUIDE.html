@@ -314,7 +314,7 @@ python -m pytest -q
 <td>기존과 동일</td>
 </tr>
 </tbody></table>
-<p>학생은 이 앱에서 이름·학번·닉네임을 직접 입력하지 않습니다. 서버가 Google의 서명·대상 앱·유효기간·학교 도메인·인증된 이메일·일회용 로그인 요청을 확인합니다. 이메일이 <code>23-103@ksa.hs.kr</code>처럼 숫자 2자리-숫자 3자리 형식인 학교 계정만 허용합니다. 일반 Gmail 계정이나 학교 이메일 문자열만 보내는 요청으로는 학생 로그인이 되지 않습니다.</p>
+<p>학생은 이 앱에서 이름·학번·닉네임을 직접 입력하지 않습니다. 서버가 Google의 서명·대상 앱·유효기간·학교 도메인·인증된 이메일·일회용 로그인 요청을 확인합니다. 이메일이 <code>00-000@ksa.hs.kr</code>처럼 숫자 2자리-숫자 3자리 형식인 학교 계정만 허용합니다. 일반 Gmail 계정이나 학교 이메일 문자열만 보내는 요청으로는 학생 로그인이 되지 않습니다.</p>
 <p>표시 이름은 <strong>학교 Google 계정의 프로필 이름</strong>입니다. 학교 계정에 실명이 등록되어 있어야 실명으로 표시됩니다. Google이 전달한 이름을 표시하는 것이며 주민등록 이름을 별도 대조하는 기능은 아닙니다. 프로필 이름이 별칭으로 되어 있다면 학교 계정의 이름을 실명으로 수정하거나 학교 관리자에게 문의하세요. 학교의 공식 명단과 강제 대조하려면 별도 명단 연동이 필요합니다.</p>
 <h2>1. Google Cloud 프로젝트 준비</h2>
 <ol>
@@ -377,7 +377,8 @@ python -m pytest -q
 <li><code>PUBLIC_BASE_URL</code>이 <code>https://sac-five-chi.vercel.app</code>인지 확인합니다.</li>
 <li>저장합니다. <code>DATABASE_URL</code>, <code>ADMIN_PIN</code>은 기존 값을 유지합니다. 새 DB를 만들거나 기존 DB를 초기화할 필요가 없습니다.</li>
 </ol>
-<p><code>GOOGLE_CLIENT_ID</code>가 없으면 학생 로그인은 설정 대기 안내를 보여 주고 차단합니다. 외부인·관리자 로그인과 공개 순위 화면은 계속 사용할 수 있습니다. 환경 변수 값을 바꾸면 새 배포가 필요합니다.</p>
+<p><code>GOOGLE_CLIENT_ID</code>가 없거나 값의 형식이 잘못되면 학생 로그인은 설정 대기 안내를 보여 주고 차단합니다. 외부인·관리자 로그인과 공개 순위 화면은 계속 사용할 수 있습니다. 환경 변수 값을 바꾸면 새 배포가 필요합니다.</p>
+<p>화면에 **“학교 계정 로그인을 준비 중이에요”**가 나오고 <code>/api/auth/config</code>에서 <code>google_client_id: null</code>, <code>configured: false</code>이면 Google 팝업을 열기 전의 앱 설정 단계에서 멈춘 것입니다. 변수 이름이 정확히 <code>GOOGLE_CLIENT_ID</code>인지, <strong>Production</strong>에 저장했는지, 값이 <code>…apps.googleusercontent.com</code>으로 끝나는 Web Client ID인지, 저장 후 최신 소스를 다시 배포했는지 확인하세요. API Key나 Client Secret, Client ID를 포함한 JSON 파일 전체를 값으로 넣지 않습니다. 값 양옆에 따옴표도 붙이지 않습니다.</p>
 <h2>4. 수정 소스 올리기</h2>
 <ol>
 <li>수정본 ZIP을 풀고 안쪽 <code>blotto</code> 폴더를 엽니다.</li>
@@ -405,7 +406,7 @@ python -m pytest -q
 <p>이전 배포 주소를 보호 설정으로 차단하거나, 더 이상 필요 없는 이전 배포를 삭제해 구 로그인 경로를 종료하세요. 삭제할 때는 <strong>새 학교 로그인 배포와 현재 Production을 제외</strong>하고 이전 배포인지 확인합니다. 현재 서비스에서만 쿠키를 무효화하는 것으로 예전 서버 코드까지 중지되는 것은 아닙니다. 이 수정본을 적용한 뒤 예전 인증 코드로 롤백하지 마세요.</p>
 <h2>기존 참가자 데이터 처리</h2>
 <ul>
-<li>기존 <code>student_id</code>가 인증된 학교 이메일 앞부분과 정확히 일치하면 같은 참가자 ID로 연결합니다. 기존 제출·횟수·간식 기록을 유지합니다. 예: 기존 학번 <code>23-103</code> → <code>23-103@ksa.hs.kr</code>.</li>
+<li>기존 <code>student_id</code>가 인증된 학교 이메일 앞부분과 정확히 일치하면 같은 참가자 ID로 연결합니다. 기존 제출·횟수·간식 기록을 유지합니다. 예: 기존 학번 <code>00-000</code> → <code>00-000@ksa.hs.kr</code>.</li>
 <li>이전에는 이름을 임의로 입력할 수 있었으므로, 기존 이름과 Google 이름이 다르다는 이유만으로 학교 계정 소유자의 로그인을 막지 않습니다.</li>
 <li>예전 학생 로그인 쿠키는 새 인증의 증거로 인정하지 않습니다. 학생은 Google로 다시 로그인해야 합니다.</li>
 <li>기존 실명은 새 인증과 이름 공개 동의 전까지 자동으로 공개하지 않습니다. 재인증 이후 그 학생의 공개 표시 이름이 학교 계정 이름으로 바뀝니다.</li>
@@ -717,6 +718,8 @@ cp .env.example .env
 </section><section id="verification"><h1>검증 기록 · 2026-10-22</h1>
 <p>이 문서는 구현한 기능과 실제로 확인한 범위를 구분합니다. 설계서 5-4의 모든 현장 인수 기준을 만족했다고 선언하는 문서가 아닙니다.</p>
 <h2>자동 검증</h2>
+<h3>로그인 안내의 학번 예시 제거 · 2026-10-22</h3>
+<p>로그인 화면의 구체적인 학번 예시를 <code>학번@ksa.hs.kr</code>로 바꾸고 문서·테스트 자료의 예시도 교체했습니다. 정적 자산 버전은 <code>school-auth-20261022-r2</code>로 맞췄습니다. 인증 로직은 변경하지 않았습니다. JavaScript 구문 검사와 인증·백엔드 검사 <strong>62 passed, 1 deselected</strong>를 확인했습니다. 제외 항목은 기존 성능 시험입니다.</p>
 <h3>학교 Google 로그인 전환 · 2026-10-22</h3>
 <p>명령: <code>python3 -m pytest tests -q -k &#39;not 30_concurrent&#39;</code> — <strong>91 passed, 1 deselected, 1 warning</strong>, 8.58초. 제외한 항목은 기존 30명 동시 제출 성능 벤치마크이며, 인증 변경 검증을 위해 기존 부하 시험을 반복하지 않았습니다. 경고는 기존 Starlette/httpx 사용 중단 예정 안내입니다. <code>node --check public/app.js</code>, <code>node --check public/admin.js</code>와 Vercel 설정 JSON 검사도 통과했습니다.</p>
 <table>

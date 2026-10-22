@@ -92,7 +92,7 @@ def booth(tmp_path, monkeypatch):
         def client(self):
             return stack.enter_context(TestClient(app))
 
-        def google_token(self, client, *, name="테스트학생", student_id="23-103", sub=None, claims=None):
+        def google_token(self, client, *, name="테스트학생", student_id="00-000", sub=None, claims=None):
             nonce = ok(client.post("/api/auth/google/challenge", json={"consent": True}))["nonce"]
             token = "test-token-" + uuid.uuid4().hex
             verified_credentials[token] = {
@@ -110,7 +110,7 @@ def booth(tmp_path, monkeypatch):
             ok(client.post("/api/session", json={"kind": "GUEST", "nickname": nickname or "손님" + uuid.uuid4().hex[:5], "consent": True}))
             return client
 
-        def student(self, name="테스트학생", student_id="23-103", nickname="학생별명"):
+        def student(self, name="테스트학생", student_id="00-000", nickname="학생별명"):
             client = stack.enter_context(TestClient(app))
             credential = self.google_token(client, name=name, student_id=student_id)
             response = client.post("/api/auth/google", json={"credential": credential, "nickname": nickname, "consent": True})
@@ -351,7 +351,7 @@ def test_T15_student_multidevice_real_name_and_consent(booth):
     response = client.post("/api/session", json={"kind": "GUEST", "nickname": "미동의자", "consent": False})
     assert response.status_code == 400
     assert identity["nickname"] == "테스트학생"
-    assert "23-103" not in str(identity) and "ksa.hs.kr" not in str(identity)
+    assert "00-000" not in str(identity) and "ksa.hs.kr" not in str(identity)
 
 
 def test_T16_top10_student_names_without_email_and_purge(booth):
