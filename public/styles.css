@@ -26,3 +26,8 @@ dialog{border:1px solid var(--khaki);border-radius:8px;background:var(--parchmen
   .stock-number{font-size:96px}
 }
 @media(min-width:1500px){.stock-number{font-size:110px}}
+
+/* School account sign-in and temporary guest registration. */
+.join-panel{min-width:0}.school-login{display:grid;gap:15px}.school-login-note{padding:15px;border:1px solid var(--khaki);border-radius:5px;background:var(--parchment);font-size:14px}.school-login-note strong{display:block;margin-bottom:8px}.school-login-note p{font-size:12px;line-height:1.8;color:var(--leather)}.school-login-note p+p{margin-top:8px}.school-email-example{font-family:system-ui,sans-serif;font-weight:600;overflow-wrap:anywhere}.google-signin{min-height:44px;width:100%;max-width:400px;min-width:0}.google-signin>div{max-width:100%}.school-login .join-fineprint{margin-top:0}.school-popup-help{font-size:11px}.school-login .error-text:empty{display:none}
+
+.privacy-page{max-width:780px;margin:0 auto;padding:40px 24px 60px}.privacy-page>.eyebrow{margin-top:35px}.privacy-page>h1{margin:12px 0}.privacy-page>p{margin-top:16px}.privacy-page>.privacy-list{margin-top:28px}

@@ -12,11 +12,15 @@ import time
 import uuid
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from . import db, engine
+from . import db, engine, google_auth
 
 ITEMS = ('MYCHEW', 'SESAME', 'ACE')
 COOKIE = 'blotto_session'
 ADMIN_COOKIE = 'blotto_admin'
+GOOGLE_CHALLENGE_COOKIE = 'blotto_google_challenge'
+SCHOOL_DOMAIN = 'ksa.hs.kr'
+GUEST_SESSION_HOURS = 12
+SCHOOL_CONSENT_VERSION = '2026-10-school-google-v2'
 
 class GameError(Exception):
     def __init__(self, code, message, status=409):
@@ -47,7 +51,13 @@ def day_public(row):
 def participant(c, token, required=True):
     row = None
     if token:
-        row = c.one("SELECT p.* FROM sessions s JOIN participants p ON p.id=s.participant_id WHERE s.token_hash=? AND s.role='PLAYER' AND s.expires_at>?",(digest(token),stamp()))
+        row = c.one("""SELECT p.*,i.google_sub AS verified_school_subject
+            FROM sessions s JOIN participants p ON p.id=s.participant_id
+            LEFT JOIN school_identities i ON i.participant_id=p.id
+            WHERE s.token_hash=? AND s.expires_at>? AND (
+                (p.kind='STUDENT' AND s.role='SCHOOL' AND i.google_sub IS NOT NULL) OR
+                (p.kind='GUEST' AND s.role IN ('GUEST','PLAYER') AND s.created_at>?)
+            )""",(digest(token),stamp(),(now()-timedelta(hours=GUEST_SESSION_HOURS)).isoformat()))
     if required: need(row is not None,'UNAUTHORIZED','다시 로그인해 주세요.',401)
     return row
 
@@ -70,7 +80,12 @@ def rate_limit(key, limit, window):
     need(allowed,'RATE_LIMITED','요청이 많아요. 잠시 후 다시 시도해 주세요.',429)
 
 def display_name(row):
-    return '익명 전술가' if row.get('name_hidden') else row['nickname']
+    if row.get('name_hidden'): return '익명 전술가'
+    # A legacy student's self-entered name must stay private until Google login
+    # and the new consent explicitly authorize displaying the account name.
+    if row.get('verified_school_subject') and row.get('real_name'):
+        return row['real_name']
+    return row['nickname']
 
 def threshold(c, day_no):
     row=c.one('SELECT value_bp FROM threshold_history WHERE day_no=? ORDER BY set_at DESC LIMIT 1',(day_no,))
@@ -108,6 +123,7 @@ def state_in(c, token=None):
     return {'day_no':day['day_no'],'booth_state':booth,'open_now':bool(booth=='OPEN' and within and not purged),
         'next_open':next_open,'attempts_left':max(0,3-count),'mychew_left':max(0,day['mychew_cap_cum']-counters(c)['mychew_used']),
         'participant_id':person['id'] if person else None,'nickname':display_name(person) if person else None,
+        'kind':person['kind'] if person else None,'auth_method':('GOOGLE' if person['kind']=='STUDENT' else 'GUEST') if person else None,
         'server_time':stamp(),'privacy_contact':os.getenv('PRIVACY_CONTACT','Automata 부스 운영진'),
         'cloud_mode':bool(os.getenv('DATABASE_URL')),'purged':purged,'threshold_bp':threshold(c,day['day_no'])}
 
@@ -117,35 +133,140 @@ def state(token=None):
 def login(payload, old_token=None):
     need(payload.get('consent') is True,'CONSENT_REQUIRED','개인정보 수집·이용 동의가 필요해요.',400)
     kind=payload.get('kind'); nickname=payload.get('nickname','')
-    need(kind in ('STUDENT','GUEST'),'INVALID_INPUT','참가 구분을 선택해 주세요.',400)
+    need(kind!='STUDENT','GOOGLE_LOGIN_REQUIRED','재학생은 학교 Google 계정으로 로그인해 주세요.',401)
+    need(kind=='GUEST','INVALID_INPUT','외부인 임시 참가를 선택해 주세요.',400)
     need(isinstance(nickname,str) and 2<=len(nickname.strip())<=10,'INVALID_NICKNAME','닉네임은 2~10자예요.',400)
     nickname=nickname.strip()
     need(not any(ord(ch)<32 for ch in nickname) and not re.search(r'[<>@]|\d{7,}',nickname),'INVALID_NICKNAME','닉네임에 연락처나 특수 기호를 쓰지 마세요.',400)
     blocked=['시발','씨발','씨팔','병신','개새끼','fuck','shit']+[v.strip().lower() for v in os.getenv('BLOCKED_NICKNAMES','').split(',') if v.strip()]
     need(not any(v in nickname.lower().replace(' ','') for v in blocked),'INVALID_NICKNAME','다른 닉네임을 골라 주세요.',400)
-    student_id=real_name=None
-    if kind=='STUDENT':
-        student_id=payload.get('student_id',''); real_name=payload.get('real_name','')
-        need(isinstance(student_id,str) and re.fullmatch(r'[A-Za-z0-9-]{2,24}',student_id.strip()) is not None,'INVALID_INPUT','학번을 확인해 주세요.',400)
-        need(isinstance(real_name,str) and 1<=len(real_name.strip())<=30,'INVALID_INPUT','이름을 확인해 주세요.',400)
-        student_id,real_name=student_id.strip(),real_name.strip()
     with db.transaction(write=True) as c:
         need(db.config(c,'purged')!='true','EVENT_ENDED','개인정보 파기가 완료되어 참여가 종료됐어요.')
-        person=c.one('SELECT * FROM participants WHERE student_id=?',(student_id,)) if student_id else None
-        if person:
-            need(person['real_name']==real_name,'STUDENT_ID_CONFLICT','학번이 다른 이름으로 사용 중이에요. 스태프에게 문의해 주세요.')
-        else:
+        person=participant(c,old_token,False)
+        # A valid guest cookie, never a nickname, proves continuity. Reopening
+        # this form cannot reset the same browser's daily submission allowance.
+        existing_guest=bool(person and person['kind']=='GUEST')
+        if not existing_guest:
             need(c.one('SELECT id FROM participants WHERE nickname=?',(nickname,)) is None,'NICKNAME_TAKEN','이미 쓰고 있는 닉네임이에요.')
-            person={'id':uid(),'nickname':nickname,'name_hidden':0}
-            c.execute('INSERT INTO participants(id,kind,student_id,real_name,nickname,consent_at) VALUES(?,?,?,?,?,?)',(person['id'],kind,student_id,real_name,nickname,stamp()))
+            person={'id':uid(),'kind':'GUEST','nickname':nickname,'name_hidden':0}
+            c.execute('INSERT INTO participants(id,kind,nickname,consent_at,consent_version) VALUES(?,?,?,?,?)',(person['id'],'GUEST',nickname,stamp(),SCHOOL_CONSENT_VERSION))
         token=secrets.token_urlsafe(32)
-        c.execute('INSERT INTO sessions(token_hash,participant_id,role,expires_at,created_at) VALUES(?,?,?,?,?)',(digest(token),person['id'],'PLAYER',(now()+timedelta(days=30)).isoformat(),stamp()))
-        day=get_day(c); attempts=c.scalar('SELECT COUNT(*) FROM submissions WHERE participant_id=? AND day_no=?',(person['id'],day['day_no']))
-        return {'participant_id':person['id'],'nickname':display_name(person),'attempts_left':max(0,3-attempts)},token
+        # Keep an existing guest's original expiry; repeated login does not turn
+        # a temporary account into an indefinitely extended session.
+        previous=c.one('SELECT created_at,expires_at FROM sessions WHERE token_hash=?',(digest(old_token),)) if old_token else None
+        created=now();expires=created+timedelta(hours=GUEST_SESSION_HOURS)
+        if previous and existing_guest:
+            created=datetime.fromisoformat(previous['created_at'])
+            expires=min(datetime.fromisoformat(previous['expires_at']),created+timedelta(hours=GUEST_SESSION_HOURS))
+        c.execute('INSERT INTO sessions(token_hash,participant_id,role,expires_at,created_at) VALUES(?,?,?,?,?)',(digest(token),person['id'],'GUEST',expires.isoformat(),created.isoformat()))
+        if old_token:c.execute('DELETE FROM sessions WHERE token_hash=?',(digest(old_token),))
+        return session_public(c,person),token
 
-def logout(token):
-    if token:
-        with db.transaction(write=True) as c: c.execute('DELETE FROM sessions WHERE token_hash=?',(digest(token),))
+
+def session_public(c,person):
+    day=get_day(c)
+    attempts=c.scalar('SELECT COUNT(*) FROM submissions WHERE participant_id=? AND day_no=?',(person['id'],day['day_no']))
+    return {'participant_id':person['id'],'nickname':display_name(person),'kind':person['kind'],
+            'auth_method':'GOOGLE' if person['kind']=='STUDENT' else 'GUEST','attempts_left':max(0,3-attempts)}
+
+
+def google_config():
+    client_id=os.getenv('GOOGLE_CLIENT_ID','').strip()
+    configured=bool(re.fullmatch(r'[A-Za-z0-9_-]+\.apps\.googleusercontent\.com',client_id))
+    return {'google_client_id':client_id if configured else None,'school_domain':SCHOOL_DOMAIN,
+            'configured':configured,'guest_session_hours':GUEST_SESSION_HOURS}
+
+
+def require_google_config():
+    cfg=google_config()
+    need(cfg['configured'],'GOOGLE_AUTH_NOT_CONFIGURED','학교 Google 로그인 설정이 아직 완료되지 않았어요. 운영진에게 문의해 주세요.',503)
+    return cfg['google_client_id']
+
+
+def google_challenge(payload,old_cookie=None):
+    require_google_config()
+    need(payload.get('consent') is True,'CONSENT_REQUIRED','학교 계정 정보 이용과 이름 공개에 동의해 주세요.',400)
+    cookie=secrets.token_urlsafe(32);nonce=secrets.token_urlsafe(32)
+    with db.transaction(write=True) as c:
+        need(db.config(c,'purged')!='true','EVENT_ENDED','개인정보 파기가 완료되어 참여가 종료됐어요.')
+        c.execute('DELETE FROM google_login_challenges WHERE expires_at<=?',(stamp(),))
+        if old_cookie:c.execute('DELETE FROM google_login_challenges WHERE cookie_hash=?',(digest(old_cookie),))
+        c.execute('INSERT INTO google_login_challenges(cookie_hash,nonce_hash,expires_at,created_at) VALUES(?,?,?,?)',
+                  (digest(cookie),digest(nonce),(now()+timedelta(minutes=10)).isoformat(),stamp()))
+    return {'nonce':nonce},cookie
+
+
+def google_login(payload,challenge_cookie,old_token=None):
+    audience=require_google_config()
+    need(payload.get('consent') is True,'CONSENT_REQUIRED','학교 계정 정보 이용과 이름 공개에 동의해 주세요.',400)
+    credential=payload.get('credential')
+    need(isinstance(credential,str) and 1<=len(credential)<=16000,'GOOGLE_AUTH_INVALID','Google 로그인 정보를 다시 받아 주세요.',401)
+    need(isinstance(challenge_cookie,str) and 20<=len(challenge_cookie)<=200,'AUTH_CHALLENGE_EXPIRED','로그인 준비 시간이 지났어요. 학교 로그인 버튼을 다시 눌러 주세요.',401)
+    # Consume before the network call in a separately committed transaction.
+    # Neither verification failure nor concurrent requests can reuse a nonce.
+    with db.transaction(write=True) as c:
+        challenge=c.one('SELECT nonce_hash,expires_at FROM google_login_challenges WHERE cookie_hash=?',(digest(challenge_cookie),))
+        c.execute('DELETE FROM google_login_challenges WHERE cookie_hash=? OR expires_at<=?',(digest(challenge_cookie),stamp()))
+    need(challenge is not None and challenge['expires_at']>stamp(),'AUTH_CHALLENGE_EXPIRED','로그인 준비 시간이 지났어요. 학교 로그인 버튼을 다시 눌러 주세요.',401)
+    try:
+        claims=google_auth.verify_credential(credential,audience)
+    except google_auth.GoogleVerificationError as exc:
+        if exc.unavailable:raise GameError('GOOGLE_AUTH_UNAVAILABLE','Google 계정 확인에 연결하지 못했어요. 다시 시도해 주세요.',503) from None
+        raise GameError('GOOGLE_AUTH_INVALID','Google 로그인 정보를 확인할 수 없어요. 다시 로그인해 주세요.',401) from None
+    valid=claims.get('aud')==audience and claims.get('iss') in ('accounts.google.com','https://accounts.google.com')
+    tick=time.time();expiry=claims.get('exp');issued=claims.get('iat')
+    valid=valid and type(expiry) in (int,float) and expiry>tick and type(issued) in (int,float) and issued<=tick
+    nonce=claims.get('nonce')
+    valid=valid and isinstance(nonce,str) and hmac.compare_digest(digest(nonce),challenge['nonce_hash'])
+    need(valid,'GOOGLE_AUTH_INVALID','Google 로그인 정보를 확인할 수 없어요. 다시 로그인해 주세요.',401)
+    email=claims.get('email');subject=claims.get('sub');name=claims.get('name')
+    need(claims.get('email_verified') is True and claims.get('hd')==SCHOOL_DOMAIN and isinstance(email,str)
+         and re.fullmatch(r'[0-9]{2}-[0-9]{3}@ksa\.hs\.kr',email.lower()) is not None,
+         'SCHOOL_ACCOUNT_REQUIRED','00-000@ksa.hs.kr 형식의 학교 Google 계정으로 로그인해 주세요.',403)
+    need(isinstance(subject,str) and 1<=len(subject)<=255 and isinstance(name,str) and 1<=len(name.strip())<=100
+         and not any(ord(ch)<32 for ch in name) and not re.search(r'[<>]',name),
+         'GOOGLE_AUTH_INVALID','학교 Google 계정에 이름이 등록되어 있는지 확인해 주세요.',401)
+    email=email.lower();name=name.strip();student_id=email.split('@',1)[0]
+    with db.transaction(write=True) as c:
+        need(db.config(c,'purged')!='true','EVENT_ENDED','개인정보 파기가 완료되어 참여가 종료됐어요.')
+        identity=c.one('SELECT * FROM school_identities WHERE google_sub=?',(subject,))
+        migrated=False
+        if identity:
+            need(identity['school_email']==email,'ACCOUNT_CONFLICT','학교 계정 정보가 변경됐어요. 운영진에게 문의해 주세요.')
+            person=c.one('SELECT * FROM participants WHERE id=?',(identity['participant_id'],))
+            need(person is not None and person['kind']=='STUDENT' and person['student_id']==student_id,'ACCOUNT_CONFLICT','학교 계정 연결을 운영진에게 확인해 주세요.')
+        else:
+            need(c.one('SELECT google_sub FROM school_identities WHERE school_email=?',(email,)) is None,'ACCOUNT_CONFLICT','학교 계정 연결을 운영진에게 확인해 주세요.')
+            person=c.one('SELECT * FROM participants WHERE student_id=?',(student_id,))
+            if person:
+                need(person['kind']=='STUDENT' and c.one('SELECT google_sub FROM school_identities WHERE participant_id=?',(person['id'],)) is None,
+                     'ACCOUNT_CONFLICT','학교 계정 연결을 운영진에게 확인해 주세요.')
+                migrated=True
+            else:
+                person={'id':uid(),'kind':'STUDENT','student_id':student_id,'nickname':'school-'+uid(),'name_hidden':0}
+                c.execute('INSERT INTO participants(id,kind,student_id,real_name,nickname,consent_at,consent_version) VALUES(?,?,?,?,?,?,?)',
+                          (person['id'],'STUDENT',student_id,name,person['nickname'],stamp(),SCHOOL_CONSENT_VERSION))
+            c.execute('INSERT INTO school_identities(google_sub,participant_id,school_email,verified_at) VALUES(?,?,?,?)',
+                      (subject,person['id'],email,stamp()))
+        c.execute('UPDATE participants SET real_name=?,consent_at=?,consent_version=? WHERE id=?',(name,stamp(),SCHOOL_CONSENT_VERSION,person['id']))
+        c.execute('UPDATE school_identities SET verified_at=? WHERE google_sub=?',(stamp(),subject))
+        # Every unverified legacy token is rejected by participant() immediately;
+        # remove those rows too when this owner first claims the account.
+        c.execute("DELETE FROM sessions WHERE participant_id=? AND role!='SCHOOL'",(person['id'],))
+        if old_token:c.execute('DELETE FROM sessions WHERE token_hash=?',(digest(old_token),))
+        token=secrets.token_urlsafe(32)
+        c.execute('INSERT INTO sessions(token_hash,participant_id,role,expires_at,created_at) VALUES(?,?,?,?,?)',
+                  (digest(token),person['id'],'SCHOOL',(now()+timedelta(days=30)).isoformat(),stamp()))
+        person.update(real_name=name,verified_school_subject=subject)
+        db.set_config(c,'board_cache','{}');db.set_config(c,'cycle','null');db.set_config(c,'cycle_at','')
+        audit(c,'SCHOOL_LOGIN',details={'participant_id':person['id'],'legacy_linked':migrated});db.bump(c)
+        return session_public(c,person),token
+
+def logout(token,challenge_cookie=None):
+    if token or challenge_cookie:
+        with db.transaction(write=True) as c:
+            if token:c.execute('DELETE FROM sessions WHERE token_hash=?',(digest(token),))
+            if challenge_cookie:c.execute('DELETE FROM google_login_challenges WHERE cookie_hash=?',(digest(challenge_cookie),))
     return {'ok':True}
 
 def admin_login(pin, ip):
@@ -171,11 +292,12 @@ def pool_rows(c, for_submission=False):
         # Display names and historical snapshot scores are loaded by board reads.
         rows=c.all('SELECT id,participant_id,day_no,l1,l2,l3,l4,l5,is_seed,is_ranked,submitted_at FROM submissions ORDER BY submitted_at,id')
     else:
-        rows=c.all('SELECT s.id,s.participant_id,s.day_no,s.l1,s.l2,s.l3,s.l4,s.l5,s.is_seed,s.is_ranked,s.points,s.opponents,s.submitted_at,p.nickname,p.name_hidden FROM submissions s LEFT JOIN participants p ON p.id=s.participant_id ORDER BY s.submitted_at,s.id')
+        rows=c.all('SELECT s.id,s.participant_id,s.day_no,s.l1,s.l2,s.l3,s.l4,s.l5,s.is_seed,s.is_ranked,s.points,s.opponents,s.submitted_at,p.nickname,p.name_hidden,p.real_name,i.google_sub AS verified_school_subject FROM submissions s LEFT JOIN participants p ON p.id=s.participant_id LEFT JOIN school_identities i ON i.participant_id=p.id ORDER BY s.submitted_at,s.id')
     for row in rows:
         row['strategy']=[row['l1'],row['l2'],row['l3'],row['l4'],row['l5']]
         if row['participant_id'] is None: row['nickname']='시드'
-        elif row.get('name_hidden'): row['nickname']='익명 전술가'
+        elif not for_submission: row['nickname']=display_name(row)
+        row.pop('real_name',None);row.pop('verified_school_subject',None)
     return rows
 
 def analysis_in(c, rows):
@@ -353,7 +475,7 @@ def hall_in(c,scope):
     row=c.one('SELECT * FROM rank_freeze WHERE scope=?',(scope,))
     if not row: return {'scope':scope,'frozen':False,'frozen_at':None,'rankings':[]}
     rankings=json.loads(row['rankings_json'])
-    people={r['id']:display_name(r) for r in c.all('SELECT id,nickname,name_hidden FROM participants')}
+    people={r['id']:display_name(r) for r in c.all('SELECT p.id,p.nickname,p.name_hidden,p.real_name,i.google_sub AS verified_school_subject FROM participants p LEFT JOIN school_identities i ON i.participant_id=p.id')}
     for rank in rankings: rank['nickname']=people.get(rank['participant_id'],'익명 전술가')
     return {'scope':scope,'frozen':True,'frozen_at':row['frozen_at'],'rankings':rankings}
 
@@ -481,12 +603,12 @@ def add_seeds(token,payload,single=False):
 def claims(token,status=None):
     with db.transaction() as c:
         require_admin(c,token); day=get_day(c)
-        rows=c.all('SELECT e.*,s.participant_id,s.day_no,p.nickname,p.name_hidden FROM entitlements e JOIN submissions s ON s.id=e.submission_id JOIN participants p ON p.id=s.participant_id WHERE s.day_no=? ORDER BY e.issued_at DESC',(day['day_no'],))
+        rows=c.all('SELECT e.*,s.participant_id,s.day_no,p.nickname,p.name_hidden,p.real_name,i.google_sub AS verified_school_subject FROM entitlements e JOIN submissions s ON s.id=e.submission_id JOIN participants p ON p.id=s.participant_id LEFT JOIN school_identities i ON i.participant_id=p.id WHERE s.day_no=? ORDER BY e.issued_at DESC',(day['day_no'],))
         counts={'ISSUED':0,'CLAIMED':0,'VOID':0}; by_item={x:0 for x in ITEMS}; items=[]
         for row in rows:
             counts[row['status']]+=1
             if row['status']=='CLAIMED': by_item[row['choice']]+=1
-            row['nickname']=display_name(row);row.pop('name_hidden',None);row['premium_exhausted']=bool(row['premium_exhausted'])
+            row['nickname']=display_name(row);row.pop('name_hidden',None);row.pop('real_name',None);row.pop('verified_school_subject',None);row['premium_exhausted']=bool(row['premium_exhausted'])
             if not status or row['status']==status: items.append(row)
         return {'items':items,'counts':counts,'by_item':by_item}
 
@@ -520,8 +642,11 @@ def void_entitlement(token,entitlement_id,payload):
 def participants(token):
     with db.transaction() as c:
         require_admin(c,token)
-        rows=c.all('SELECT p.id,p.nickname,p.kind,p.name_hidden,COUNT(s.id) AS submission_count FROM participants p LEFT JOIN submissions s ON s.participant_id=p.id GROUP BY p.id,p.nickname,p.kind,p.name_hidden ORDER BY p.nickname')
-        for r in rows:r['nickname']=display_name(r);r['name_hidden']=bool(r['name_hidden'])
+        rows=c.all('SELECT p.id,p.nickname,p.kind,p.name_hidden,p.real_name,i.google_sub AS verified_school_subject,COUNT(s.id) AS submission_count FROM participants p LEFT JOIN submissions s ON s.participant_id=p.id LEFT JOIN school_identities i ON i.participant_id=p.id GROUP BY p.id,p.nickname,p.kind,p.name_hidden,p.real_name,i.google_sub ORDER BY p.nickname')
+        for r in rows:
+            r['nickname']=display_name(r);r['name_hidden']=bool(r['name_hidden'])
+            r['auth_method']='GOOGLE' if r.get('verified_school_subject') else ('GUEST' if r['kind']=='GUEST' else 'LEGACY')
+            r.pop('real_name',None);r.pop('verified_school_subject',None)
         return {'items':rows}
 
 def hide(token,participant_id,payload):
@@ -558,7 +683,8 @@ def purge(token,payload):
         # Every copy of a nickname, including freeze/cache and seed author, is removed.
         for index,row in enumerate(c.all('SELECT id FROM participants ORDER BY id'),1):
             c.execute('UPDATE participants SET student_id=NULL,real_name=NULL,nickname=?,name_hidden=1,consent_at=NULL WHERE id=?',('익명-'+str(index),row['id']))
-        c.execute('DELETE FROM sessions');c.execute('DELETE FROM rate_limits');c.execute('DELETE FROM audit_log')
+        c.execute('DELETE FROM sessions');c.execute('DELETE FROM school_identities');c.execute('DELETE FROM google_login_challenges')
+        c.execute('DELETE FROM rate_limits');c.execute('DELETE FROM audit_log')
         c.execute("UPDATE submissions SET author='' ")
         c.execute("UPDATE threshold_history SET reason='개인정보 파기',set_by='ADMIN'")
         for row in c.all('SELECT scope,rankings_json FROM rank_freeze'):
@@ -574,9 +700,9 @@ def reset(token,payload):
     need(payload.get('confirm')=='RESET','CONFIRM_REQUIRED','RESET을 직접 입력해 주세요.',400);reason=reason_text(payload)
     with db.transaction(write=True) as c:
         require_admin(c,token);need(not c.scalar('SELECT COUNT(*) FROM day_config WHERE ever_opened=1'),'RESET_LOCKED','개장 후에는 초기화할 수 없어요.')
-        for table in ('participants','submissions','entitlements','threshold_history','inventory_ledger','rank_freeze','rate_limits'):
+        for table in ('school_identities','google_login_challenges','participants','submissions','entitlements','threshold_history','inventory_ledger','rank_freeze','rate_limits'):
             c.execute('DELETE FROM '+table)
-        c.execute("DELETE FROM sessions WHERE role='PLAYER'");c.execute("UPDATE day_config SET booth_state='CLOSED',threshold_applied=0,cap_override=0,cap_closed_at=NULL,frozen_at=NULL")
+        c.execute("DELETE FROM sessions WHERE role!='ADMIN'");c.execute("UPDATE day_config SET booth_state='CLOSED',threshold_applied=0,cap_override=0,cap_closed_at=NULL,frozen_at=NULL")
         for key,value in [('active_day','1'),('score_cache','{}'),('board_cache','{}'),('cycle','null'),('cycle_at',''),('purged','false')]:db.set_config(c,key,value)
         audit(c,'RESET',reason);db.bump(c);return {'ok':True}
 

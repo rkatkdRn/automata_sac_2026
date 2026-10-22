@@ -41,7 +41,8 @@ def create_app():
         else:
             response=await call_next(request)
         response.headers['X-Content-Type-Options']='nosniff'
-        response.headers['Referrer-Policy']='same-origin'
+        response.headers['Referrer-Policy']='strict-origin-when-cross-origin'
+        response.headers['Cross-Origin-Opener-Policy']='same-origin-allow-popups'
         response.headers['X-Frame-Options']='DENY'
         if request.url.path.startswith('/api') or request.url.path=='/healthz': response.headers['Cache-Control']='no-store'
         return response
@@ -83,11 +84,31 @@ def create_app():
     def login(request:Request,payload:dict=Body(...)):
         ip=request.client.host if request.client else 'unknown'
         s.rate_limit('login:'+s.digest(ip),60,60)
-        data,token=s.login(payload,player(request));return cookie_response(request,data,token,s.COOKIE,30*24*3600)
+        data,token=s.login(payload,player(request));return cookie_response(request,data,token,s.COOKIE,s.GUEST_SESSION_HOURS*3600)
+
+    @app.get('/api/auth/config')
+    def auth_config():return s.google_config()
+
+    @app.post('/api/auth/google/challenge')
+    def google_challenge(request:Request,payload:dict=Body(...)):
+        ip=request.client.host if request.client else 'unknown'
+        s.rate_limit('google-challenge:'+s.digest(ip),60,60)
+        data,cookie=s.google_challenge(payload,request.cookies.get(s.GOOGLE_CHALLENGE_COOKIE))
+        return cookie_response(request,data,cookie,s.GOOGLE_CHALLENGE_COOKIE,10*60)
+
+    @app.post('/api/auth/google')
+    def google_login(request:Request,payload:dict=Body(...)):
+        ip=request.client.host if request.client else 'unknown'
+        s.rate_limit('google-login:'+s.digest(ip),60,60)
+        data,token=s.google_login(payload,request.cookies.get(s.GOOGLE_CHALLENGE_COOKIE),player(request))
+        response=cookie_response(request,data,token,s.COOKIE,30*24*3600)
+        response.delete_cookie(s.GOOGLE_CHALLENGE_COOKIE,path='/')
+        return response
 
     @app.post('/api/session/logout')
     def logout(request:Request):
-        data=s.logout(player(request));response=JSONResponse(data);response.delete_cookie(s.COOKIE,path='/');return response
+        data=s.logout(player(request),request.cookies.get(s.GOOGLE_CHALLENGE_COOKIE))
+        response=JSONResponse(data);response.delete_cookie(s.COOKIE,path='/');response.delete_cookie(s.GOOGLE_CHALLENGE_COOKIE,path='/');return response
 
     @app.get('/api/state')
     def state(request:Request):return s.state(player(request))
@@ -180,7 +201,7 @@ def create_app():
     def audit(request:Request):return s.audits(admin(request))
     @app.post('/api/admin/purge')
     def purge(request:Request,payload:dict=Body(...)):
-        response=JSONResponse(s.purge(admin(request),payload));response.delete_cookie(s.COOKIE,path='/');response.delete_cookie(s.ADMIN_COOKIE,path='/');return response
+        response=JSONResponse(s.purge(admin(request),payload));response.delete_cookie(s.COOKIE,path='/');response.delete_cookie(s.ADMIN_COOKIE,path='/');response.delete_cookie(s.GOOGLE_CHALLENGE_COOKIE,path='/');return response
     @app.post('/api/admin/reset')
     def reset(request:Request,payload:dict=Body(...)):return s.reset(admin(request),payload)
 

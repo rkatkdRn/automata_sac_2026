@@ -28,6 +28,15 @@ CREATE TABLE IF NOT EXISTS sessions (
  token_hash TEXT PRIMARY KEY, participant_id TEXT, role TEXT NOT NULL,
  expires_at TEXT NOT NULL, created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS school_identities (
+ google_sub TEXT PRIMARY KEY, participant_id TEXT NOT NULL UNIQUE,
+ school_email TEXT NOT NULL UNIQUE, verified_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS google_login_challenges (
+ cookie_hash TEXT PRIMARY KEY, nonce_hash TEXT NOT NULL,
+ expires_at TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS google_challenge_expiry ON google_login_challenges(expires_at);
 CREATE TABLE IF NOT EXISTS submissions (
  id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, participant_id TEXT,
  day_no INTEGER NOT NULL, attempt_no INTEGER,

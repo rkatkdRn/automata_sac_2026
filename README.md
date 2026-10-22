@@ -2,9 +2,9 @@
 
 첨부 개발설계서 v10과 참조 엔진을 바탕으로 만든 행사 운영용 웹 앱입니다. 병사 101명을 5개 전선에 배치하며, 참가자 화면·TV 스코어보드·명예의 전당·운영 콘솔을 하나의 서버에서 제공합니다.
 
-**배포 상태:** 사용자가 생성한 Vercel 배포의 2026-10-22 실행 로그에서 `ModuleNotFoundError: No module named 'server'`를 확인했습니다. 이 수정본은 시작 파일의 Python 검색 경로와 `server/**` 배포 포함 설정을 보완합니다. 전체 폴더를 GitHub에 올린 뒤 새 배포에서 `/healthz`와 화면을 확인해야 하며, 실제 클라우드 동작 확인은 아직 남아 있습니다.
+**이번 수정:** 학생은 학교 Google 계정(`00-000@ksa.hs.kr`)으로 인증하고 계정 등록 이름을 표시합니다. 외부인만 닉네임으로 최대 12시간 임시 참여합니다. 기존 학번·이름 입력 로그인은 차단합니다. 실제 서비스 적용에는 새 소스 배포와 `GOOGLE_CLIENT_ID` 설정이 필요합니다. [학교 Google 로그인 설정 순서](docs/GOOGLE_LOGIN.md)를 먼저 확인하세요. 이전 Python 패키지 로딩 수정과 모바일 메뉴 표시 수정도 포함되어 있습니다.
 
-**검증 상태:** 기능 테스트 51개와 참조 엔진 20,000쌍 대조를 통과했습니다. 조회 최적화 후 대표 풀 1,700개·30건 동시 제출은 오류 0건, 로컬 p95 약 0.83초로 설계서의 500ms 목표에 미달합니다. 실제 Vercel/PostgreSQL·현장 인수시험은 남아 있습니다. 상세: [docs/VERIFICATION.md](docs/VERIFICATION.md).
+**검증 상태:** 이번 인증 변경의 보안·회귀 시험과 기존 게임 엔진 검증은 [docs/VERIFICATION.md](docs/VERIFICATION.md)에 기록합니다. 실제 학교 Google 계정과 Vercel/PostgreSQL을 연결한 최종 인수시험은 운영진 설정 후 진행해야 합니다. 기존 대표 부하 시험은 로컬 p95 약 0.83초로 설계서의 500ms 목표에 미달했으며, 실제 서버 성능 보장을 의미하지 않습니다.
 
 ## 1. 구성과 주소
 
@@ -16,9 +16,10 @@
 | `/board` | TV용 현재 순위·순환·남은 간식 |
 | `/hall` | 일별·종합 확정 명예의 전당 |
 | `/admin` | 운영진 콘솔 |
+| `/privacy.html` | 공개 개인정보 처리 안내 |
 | `/healthz` | 서버·DB 연결·한국 시각 확인 |
 
-프론트엔드는 외부 CDN 없이 실행되는 HTML/CSS/JavaScript 모듈이고, 서버는 FastAPI + NumPy입니다. 프레임워크는 설계서의 권장 기술에서 경량 구성으로 바꾸었지만 게임 규칙은 서버에서 강제합니다. Vercel에서는 PostgreSQL을, 노트북에서는 SQLite를 사용합니다.
+프론트엔드는 HTML/CSS/JavaScript 모듈이고, 학교 로그인에는 Google Identity Services 공식 스크립트를 불러옵니다. 서버는 FastAPI + NumPy이며 Google 공식 Python 인증 라이브러리로 토큰을 검증합니다. 게임 규칙은 서버에서 강제합니다. Vercel에서는 PostgreSQL을, 노트북에서는 SQLite를 사용합니다.
 
 `Vercel 화면 + Vercel Python API → Neon PostgreSQL`
 
@@ -56,6 +57,7 @@ Vercel의 Storage/Marketplace에서 Neon을 연결하는 방식도 가능합니�
 |---|---|---|
 | `DATABASE_URL` | Vercel 필수 | Neon의 pooled PostgreSQL URL 전체 |
 | `ADMIN_PIN` | 필수 | 운영진만 아는 16자 이상 긴 비밀번호 |
+| `GOOGLE_CLIENT_ID` | 학생 로그인 필수 | Google에서 생성한 Web Client ID (`…apps.googleusercontent.com`) |
 | `PUBLIC_BASE_URL` | 배포 후 권장 | 실제 고정 주소, 예: `https://프로젝트명.vercel.app` (끝 `/` 없이) |
 | `PRIVACY_CONTACT` | 운영 전 설정 | 개인정보 담당자·연락 경로. 로그인 처리 안내에 표시됨 |
 
@@ -79,7 +81,7 @@ API 요청이 첫 실행될 때 테이블을 자동 생성합니다. 새 Neon �
 1. 이 수정본 ZIP을 새 폴더에 풀고, 안쪽 `blotto` 폴더를 엽니다.
 2. GitHub의 기존 `app.py`가 보이는 위치에서 **Add file → Upload files**를 누릅니다.
 3. 탐색기의 `blotto` 안에 있는 **파일과 폴더 모두**를 업로드 영역으로 끌어놓고 커밋합니다. `server`와 `public` 폴더도 반드시 포함합니다. ZIP 파일 자체나 바깥 `blotto` 폴더를 올리지 마세요.
-4. GitHub에서 `app.py` 옆에 `server`와 `public` 폴더가 있는지 확인합니다. `server` 안에는 `__init__.py`, `app.py`, `db.py`, `engine.py`, `service.py`가 있어야 합니다.
+4. GitHub에서 `app.py` 옆에 `server`와 `public` 폴더가 있는지 확인합니다. `server` 안에는 `__init__.py`, `app.py`, `db.py`, `engine.py`, `service.py`, `google_auth.py`가 있어야 합니다.
 5. Vercel의 새 배포가 방금 커밋을 사용했는지 확인합니다. 자동 배포가 시작되지 않으면 최신 커밋으로 배포합니다. 과거 커밋의 Redeploy는 수정 내용을 반영하지 않습니다.
 6. Production 주소의 `/healthz`에서 `ok: true`, `db: "ok"`를 확인하고 `/`, `/play`, `/admin` 화면을 확인합니다. `db: "unavailable"`이라면 서버를 불러오는 단계는 통과했으며, 다음으로 Production의 `DATABASE_URL`을 확인해야 합니다.
 
@@ -100,7 +102,9 @@ API 요청이 첫 실행될 때 테이블을 자동 생성합니다. 새 Neon �
 
 ## 4. 참가와 간식 지급 흐름
 
-재학생은 학번·이름·닉네임, 외부인은 닉네임과 동의로 시작합니다. 재학생은 다른 기기에서 같은 학번·이름으로 접속해도 횟수가 합산됩니다. 학번·이름이 본인 인증 수단은 아니라는 원래 설계의 한계는 그대로입니다. 외부인은 브라우저 쿠키를 삭제하거나 다른 기기를 쓰면 같은 사람임을 판별할 수 없습니다.
+재학생은 이름 공개·개인정보 이용에 동의한 뒤 학교 Google 계정으로 로그인합니다. 앱에서 임의로 학번·실명·닉네임을 입력하지 않습니다. `00-000@ksa.hs.kr` 형식과 학교 도메인을 서버에서 확인하고 계정에 등록된 이름을 화면에 표시합니다. 계정 프로필 이름은 실명으로 설정되어 있어야 하며, 학교 공식 명단과 이름을 대조하는 기능은 아닙니다. 다른 기기에서도 같은 Google 계정의 제출 횟수와 기록을 이어갑니다.
+
+외부인은 닉네임과 동의로 최대 12시간 임시 참여합니다. 닉네임만으로 이전 계정을 복원할 수 없습니다. 쿠키 삭제·로그아웃·다른 기기로 재참가하면 같은 사람임을 판별할 수 없는 임시 계정의 한계가 있습니다. 기존 학생 데이터는 정확히 같은 학번의 학교 이메일을 인증하면 이어지며, 예전 학생 쿠키는 재인증이 필요합니다.
 
 101명 배분을 제출하면, 누적 풀에서 본인의 모든 이전 제출을 뺀 상대들과 대결합니다. 같은 요청을 네트워크 오류 후 재전송해도 횟수와 재고는 한 번만 처리됩니다. 일일 첫 제출에만 간식을 판정하며, 2·3회차는 순위 경쟁용입니다.
 
@@ -111,13 +115,14 @@ TOP_CHOICE는 마이쮸·참깨·에이스 중 하나로 참가 간식을 **대�
 | 원래 설계 | 이 구현 |
 |---|---|
 | 노트북 1대 + SQLite | 기본 배포는 Vercel + PostgreSQL. 별도 로컬 모드에서 SQLite 지원 |
-| 인터넷 없이 사용 | 로컬 모드는 가능. Vercel 모드는 참가자·TV·운영진 모두 인터넷 필요 |
+| 인터넷 없이 사용 | 외부인 로컬 모드는 가능. 학교 Google 인증과 Vercel 모드는 인터넷 필요 |
 | 외부 위탁 없음 | 클라우드 모드 안내에 Vercel·외부 DB 사용을 반영. 운영 전 담당자가 실제 계약·보관 정책을 확인해야 함 |
 | `BEGIN IMMEDIATE`로 쓰기 직렬화 | SQLite는 동일, PostgreSQL은 트랜잭션 advisory lock 사용 |
 | 메모리 순위 캐시 | 여러 함수 인스턴스가 공유하도록 DB에 캐시와 변경 버전 저장 |
 | 장시간 SSE | 짧은 SSE 연결을 자동 재연결하고 5초 폴링으로 복구 |
 | 서버가 5분마다 로컬 백업 | 운영 노트북의 백업 스크립트 + Neon 복구 기능. Vercel 내부 파일 백업 없음 |
-| React + TypeScript 권장 | 빌드가 필요 없는 JavaScript 모듈. 외부 CDN 의존성 없음 |
+| React + TypeScript 권장 | 빌드가 필요 없는 JavaScript 모듈. 학교 인증 시 Google 공식 스크립트 사용 |
+| 학생 학번·이름·닉네임 입력 | 학교 Google 인증 후 계정 등록 이름 표시. 외부인만 임시 닉네임 |
 | 제공 예정 로고 파일 | 첨부에 로고 원본이 없어 새 SVG 엠블럼 제작. 원본 확보 시 교체 가능 |
 
 문서의 충돌은 최종 결정 사항(Q)을 우선했습니다. 개발설계서 4-4의 운영 중 임계값 상향 문구는 Q-5/R12와 충돌하므로 구현하지 않았습니다. T-07의 동시 제출 `TOP_CHOICE 1 + BASIC 1`은 EITHER 즉시 마감과 동시에 만족할 수 없습니다. 따라서 **EITHER에서는 마지막 고급 예약 다음 요청이 CAP_REACHED**, PREMIUM_SOFT에서는 고급 예약 1건 + BASIC 1건으로 검증합니다. 기본 설정은 최종 결정대로 EITHER입니다.
@@ -162,6 +167,7 @@ l1,l2,l3,l4,l5,tag,author
 | 프로젝트 생성 403 | Vercel 팀의 프로젝트 생성 권한 또는 권한 있는 개인 계정 선택 |
 | 홈페이지는 열리는데 게임 오류 | `/healthz`, `DATABASE_URL`, DB 연결 SSL, Vercel Function 로그 확인 |
 | 관리자 로그인 불가 | Production `ADMIN_PIN` 16자 이상인지 확인 후 Redeploy. 실패 5회/분 제한이면 잠시 기다림 |
+| 학생 로그인 설정 대기 / Google 오류 | [학교 Google 로그인 설정](docs/GOOGLE_LOGIN.md)의 Client ID·승인된 JavaScript 원본·학교 정책 확인 |
 | 개장 불가 | 시드 50개, 임계값 적용, 운영일 날짜/시간, 재고 입력 확인 |
 | 정상이었는데 제출 불가 | 일일 3회, 휴식시간, EITHER 상한 도달, 마감 여부 확인 |
 | 고급을 못 고름 | 개별 참깨/에이스 실물 재고 및 예약량 확인 |
@@ -184,5 +190,7 @@ l1,l2,l3,l4,l5,tag,author
 - [Cron 사용 제한](https://vercel.com/docs/cron-jobs/usage-and-pricing)
 - [Neon 연결 풀링](https://neon.com/docs/connect/connection-pooling)
 - [Neon 요금제/복구 창](https://neon.com/docs/introduction/plans)
+- [Google 로그인 설정](https://developers.google.com/identity/gsi/web/guides/get-google-api-clientid)
+- [Google 토큰 서버 검증](https://developers.google.com/identity/gsi/web/guides/verify-google-id-token)
 
 제공된 원문 규칙에서 벗어나는 의도치 않은 동작을 발견하면 재현 순서와 함께 테스트로 추가하세요. 행사 전 실기기 리허설은 별도로 필요합니다.

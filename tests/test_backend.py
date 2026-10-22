@@ -47,6 +47,7 @@ def booth(tmp_path, monkeypatch):
     monkeypatch.setenv("DB_PATH", str(tmp_path / "event.db"))
     monkeypatch.setenv("ADMIN_PIN", PIN)
     monkeypatch.setenv("PUBLIC_BASE_URL", "http://testserver")
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-client.apps.googleusercontent.com")
     postgres_url = os.getenv("BLOTTO_TEST_DATABASE_URL")
     pg_schema = None
     if postgres_url:
@@ -62,10 +63,17 @@ def booth(tmp_path, monkeypatch):
         query["options"] = f"-csearch_path={pg_schema}"
         isolated_url = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
         monkeypatch.setenv("DATABASE_URL", isolated_url)
-    from server import service
+    from server import service, google_auth
     from server.app import create_app
     clock = [datetime(2026, 10, 30, 10, 30, tzinfo=KST)]
     monkeypatch.setattr(service, "now", lambda: clock[0])
+    verified_credentials = {}
+    # Game-flow tests trust only this boundary. test_school_auth.py separately
+    # exercises Google's real cryptographic verifier with locally signed JWTs.
+    def verified_claims(credential, audience):
+        assert audience == "test-client.apps.googleusercontent.com"
+        return dict(verified_credentials[credential])
+    monkeypatch.setattr(google_auth, "verify_credential", verified_claims)
     app = create_app()
     stack = ExitStack()
     admin = stack.enter_context(TestClient(app))
@@ -79,15 +87,33 @@ def booth(tmp_path, monkeypatch):
         def __init__(self):
             self.admin, self.app, self.clock, self.path = admin, app, clock, tmp_path / "event.db"
             self.postgres = bool(postgres_url)
+            self.credentials = verified_credentials
+
+        def client(self):
+            return stack.enter_context(TestClient(app))
+
+        def google_token(self, client, *, name="테스트학생", student_id="23-103", sub=None, claims=None):
+            nonce = ok(client.post("/api/auth/google/challenge", json={"consent": True}))["nonce"]
+            token = "test-token-" + uuid.uuid4().hex
+            verified_credentials[token] = {
+                "aud": "test-client.apps.googleusercontent.com", "iss": "https://accounts.google.com",
+                "exp": int(time.time()) + 600, "iat": int(time.time()),
+                "sub": sub or "google-sub-" + student_id, "hd": "ksa.hs.kr",
+                "email": student_id + "@ksa.hs.kr", "email_verified": True,
+                "name": name, "nonce": nonce,
+            }
+            if claims: verified_credentials[token].update(claims)
+            return token
 
         def guest(self, nickname=None):
             client = stack.enter_context(TestClient(app))
             ok(client.post("/api/session", json={"kind": "GUEST", "nickname": nickname or "손님" + uuid.uuid4().hex[:5], "consent": True}))
             return client
 
-        def student(self, name="테스트학생", student_id="20260001", nickname="학생별명"):
+        def student(self, name="테스트학생", student_id="23-103", nickname="학생별명"):
             client = stack.enter_context(TestClient(app))
-            response = client.post("/api/session", json={"kind": "STUDENT", "student_id": student_id, "real_name": name, "nickname": nickname, "consent": True})
+            credential = self.google_token(client, name=name, student_id=student_id)
+            response = client.post("/api/auth/google", json={"credential": credential, "nickname": nickname, "consent": True})
             return client, response
 
         def configure(self, *, day=1, premium=40, mychew=188, rule="EITHER"):
@@ -130,7 +156,9 @@ def test_T03_invalid_does_not_consume_attempt(booth):
 
 def test_T04_T05_T13_three_attempts_next_day_and_self_exclusion(booth):
     booth.open()
-    guest = booth.guest()
+    # Students retain their identity across days; guests now expire after 12h.
+    guest, response = booth.student()
+    ok(response)
     first = ok(booth.submit(guest))
     assert first["attempt_no"] == 1 and first["reward"]["kind"] == "BASIC"
     second = ok(booth.submit(guest, WIN))
@@ -302,7 +330,7 @@ def test_T14_sqlite_consistent_backup_restores_counts(booth, tmp_path):
         assert restored.execute("SELECT COUNT(*) FROM entitlements WHERE status!='VOID'").fetchone()[0] == before["counters"]["mychew_used"]
 
 
-def test_T15_student_multidevice_conflict_nickname_and_consent(booth):
+def test_T15_student_multidevice_real_name_and_consent(booth):
     booth.open()
     a, response = booth.student()
     identity = ok(response)
@@ -313,21 +341,24 @@ def test_T15_student_multidevice_conflict_nickname_and_consent(booth):
     assert second["nickname"] == identity["nickname"]
     assert second["attempts_left"] == 2
     assert ok(booth.submit(b))["attempt_no"] == 2
-    _, response = booth.student(name="다른이름")
-    error(response, "STUDENT_ID_CONFLICT")
+    _, response = booth.student(name="학교계정변경이름")
+    updated = ok(response)
+    assert updated["participant_id"] == identity["participant_id"]
+    assert updated["nickname"] == "학교계정변경이름"
     other = booth.guest("외부별명")
     client = TestClient(booth.app)
     error(client.post("/api/session", json={"kind": "GUEST", "nickname": "외부별명", "consent": True}), "NICKNAME_TAKEN")
     response = client.post("/api/session", json={"kind": "GUEST", "nickname": "미동의자", "consent": False})
     assert response.status_code == 400
-    assert "테스트학생" not in str(identity) and "20260001" not in str(identity)
+    assert identity["nickname"] == "테스트학생"
+    assert "23-103" not in str(identity) and "ksa.hs.kr" not in str(identity)
 
 
-def test_T16_top10_nickname_only_and_purge(booth):
+def test_T16_top10_student_names_without_email_and_purge(booth):
     booth.open()
     students = []
     for i in range(12):
-        client, response = booth.student(name=f"비공개실명{i}", student_id=f"S2026{i:04d}", nickname=f"공개별명{i}")
+        client, response = booth.student(name=f"학교실명{i}", student_id=f"26-{i:03d}", nickname=f"학생입력무시{i}")
         ok(response)
         students.append(client)
         ok(booth.submit(client))
@@ -335,11 +366,13 @@ def test_T16_top10_nickname_only_and_purge(booth):
     hall = ok(booth.admin.post("/api/admin/freeze", json={"scope": "DAY1"}))
     assert len(hall["rankings"]) == 10
     assert [x["rank"] for x in hall["rankings"]] == list(range(1, 11))
-    assert "비공개실명" not in json.dumps(hall, ensure_ascii=False)
-    assert "S2026" not in json.dumps(hall, ensure_ascii=False)
+    assert "학교실명" in json.dumps(hall, ensure_ascii=False)
+    assert "학생입력무시" not in json.dumps(hall, ensure_ascii=False)
+    assert all(f'"26-{i:03d}"' not in json.dumps(hall, ensure_ascii=False) for i in range(12))
+    assert "ksa.hs.kr" not in json.dumps(hall, ensure_ascii=False)
     ok(booth.admin.post("/api/admin/purge", json={"confirm": "PURGE", "reason": "테스트 행사 종료"}))
     public = ok(students[0].get("/api/hall?scope=DAY1"))
-    assert "공개별명" not in json.dumps(public, ensure_ascii=False)
+    assert "학교실명" not in json.dumps(public, ensure_ascii=False)
     assert ok(students[0].get("/api/state"))["participant_id"] is None
     from server import db
     with db.transaction() as connection:
@@ -380,7 +413,8 @@ def test_admin_login_five_failed_attempts_persist(booth):
 
 def test_day_change_rejects_old_unsaved_request_but_replays_saved_request(booth):
     booth.open()
-    guest = booth.guest()
+    guest, response = booth.student()
+    ok(response)
     body = {"request_id": uuid.uuid4().hex, "strategy": TIE, "expected_day_no": 1}
     first = ok(guest.post("/api/submissions", json=body))
     booth.next_day()
