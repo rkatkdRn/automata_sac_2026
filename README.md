@@ -2,7 +2,7 @@
 
 첨부 개발설계서 v10과 참조 엔진을 바탕으로 만든 행사 운영용 웹 앱입니다. 병사 101명을 5개 전선에 배치하며, 참가자 화면·TV 스코어보드·명예의 전당·운영 콘솔을 하나의 서버에서 제공합니다.
 
-**배포 상태:** 코드와 Vercel 설정을 제공합니다. 2026-10-22 연결된 `automata` 팀에서 프로젝트 생성을 시도했으나 Vercel이 403 권한 오류로 거절하여 실제 공개 서버는 아직 생성되지 않았습니다. 아래 순서로 권한이 있는 계정에서 배포해야 합니다.
+**배포 상태:** 사용자가 생성한 Vercel 배포의 2026-10-22 실행 로그에서 `ModuleNotFoundError: No module named 'server'`를 확인했습니다. 이 수정본은 시작 파일의 Python 검색 경로와 `server/**` 배포 포함 설정을 보완합니다. 전체 폴더를 GitHub에 올린 뒤 새 배포에서 `/healthz`와 화면을 확인해야 하며, 실제 클라우드 동작 확인은 아직 남아 있습니다.
 
 **검증 상태:** 기능 테스트 51개와 참조 엔진 20,000쌍 대조를 통과했습니다. 조회 최적화 후 대표 풀 1,700개·30건 동시 제출은 오류 0건, 로컬 p95 약 0.83초로 설계서의 500ms 목표에 미달합니다. 실제 Vercel/PostgreSQL·현장 인수시험은 남아 있습니다. 상세: [docs/VERIFICATION.md](docs/VERIFICATION.md).
 
@@ -71,6 +71,19 @@ Vercel의 Storage/Marketplace에서 Neon을 연결하는 방식도 가능합니�
 `https://실제주소/healthz`를 열어 `ok: true`, `db: "ok"`와 한국 시각을 확인합니다. 이 확인만으로 행사 준비가 끝난 것은 아닙니다. `/admin`에서 재고·시드·운영일·임계값을 설정해야 합니다.
 
 API 요청이 첫 실행될 때 테이블을 자동 생성합니다. 새 Neon 프로젝트에 SQL을 손으로 붙여넣을 필요가 없습니다. 임의의 기존 데이터베이스와 공유하지 말고 이 앱 전용 DB를 사용하세요.
+
+### E. `No module named 'server'`가 나타날 때
+
+이 오류는 DB 연결 이전에 Python이 프로젝트의 `server` 패키지를 찾지 못했다는 뜻입니다. 로그만으로는 GitHub 업로드 누락, 배포 파일 누락, Python 검색 경로 문제 중 어느 것인지 확정할 수 없습니다.
+
+1. 이 수정본 ZIP을 새 폴더에 풀고, 안쪽 `blotto` 폴더를 엽니다.
+2. GitHub의 기존 `app.py`가 보이는 위치에서 **Add file → Upload files**를 누릅니다.
+3. 탐색기의 `blotto` 안에 있는 **파일과 폴더 모두**를 업로드 영역으로 끌어놓고 커밋합니다. `server`와 `public` 폴더도 반드시 포함합니다. ZIP 파일 자체나 바깥 `blotto` 폴더를 올리지 마세요.
+4. GitHub에서 `app.py` 옆에 `server`와 `public` 폴더가 있는지 확인합니다. `server` 안에는 `__init__.py`, `app.py`, `db.py`, `engine.py`, `service.py`가 있어야 합니다.
+5. Vercel의 새 배포가 방금 커밋을 사용했는지 확인합니다. 자동 배포가 시작되지 않으면 최신 커밋으로 배포합니다. 과거 커밋의 Redeploy는 수정 내용을 반영하지 않습니다.
+6. Production 주소의 `/healthz`에서 `ok: true`, `db: "ok"`를 확인하고 `/`, `/play`, `/admin` 화면을 확인합니다. `db: "unavailable"`이라면 서버를 불러오는 단계는 통과했으며, 다음으로 Production의 `DATABASE_URL`을 확인해야 합니다.
+
+수정 파일: `app.py`(프로젝트 경로를 Python 검색 경로에 추가), `vercel.json`(`server/**` 포함), `server/__init__.py`(패키지 설명 추가). `server`는 외부 설치 라이브러리가 아니라 이 프로젝트에 포함된 코드입니다.
 
 ## 3. 배포 직후 운영 준비 순서
 

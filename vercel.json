@@ -5,6 +5,7 @@
   "functions": {
     "app.py": {
       "maxDuration": 60,
+      "includeFiles": "server/**",
       "excludeFiles": "{tests/**,docs/**,scripts/**,backup/**,data/**,.venv/**,.pytest_cache/**,**/__pycache__/**}"
     }
   },

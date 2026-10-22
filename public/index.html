@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#2E2216">
+  <meta name="description" content="병사 101명, 다섯 개의 전선. Automata의 Colonel Blotto 전략게임에 도전하세요.">
+  <title>Colonel Blotto · Automata</title>
+  <link rel="icon" href="/assets/logo-emblem.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/assets/icon-180.png">
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#app">본문으로 이동</a>
+  <header class="site-header">
+    <a href="/" class="brand" aria-label="Colonel Blotto 시작 화면"><img src="/assets/logo-emblem.svg" alt="" width="42" height="42"><span>COLONEL BLOTTO<small>전략게임 · AUTOMATA</small></span></a>
+    <nav aria-label="주요 메뉴"><a href="/board">작전 현황</a><a href="/hall">명예의 전당</a></nav>
+  </header>
+  <main id="app" tabindex="-1"><div class="loading-screen"><img src="/assets/logo-emblem.svg" alt="" width="72" height="72"><p>작전 상황을 확인하고 있어요…</p></div></main>
+  <footer class="site-footer"><span>AUTOMATA · KSA 2026</span><button type="button" id="privacy-link" class="text-btn">개인정보 처리 안내</button><a href="/admin">운영 콘솔</a></footer>
+  <div id="toast" role="status" aria-live="polite" hidden></div>
+  <dialog id="modal"></dialog>
+  <noscript>게임에 참여하려면 브라우저의 JavaScript를 켜 주세요.</noscript>
+</body>
+</html>
