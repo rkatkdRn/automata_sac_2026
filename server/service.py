@@ -21,6 +21,8 @@ GOOGLE_CHALLENGE_COOKIE = 'blotto_google_challenge'
 SCHOOL_DOMAIN = 'ksa.hs.kr'
 GUEST_SESSION_HOURS = 12
 SCHOOL_CONSENT_VERSION = '2026-10-school-google-v2'
+TEST_DAY = db.TEST_DAY
+REAL_DAYS = (1, 2, 3)
 
 class GameError(Exception):
     def __init__(self, code, message, status=409):
@@ -46,7 +48,20 @@ def get_day(c):
 def day_public(row):
     row=dict(row); row['sessions']=json.loads(row.pop('sessions_json'))
     row['ever_opened']=bool(row['ever_opened']); row['threshold_applied']=bool(row['threshold_applied']); row['cap_override']=bool(row['cap_override'])
+    row['is_test']=is_test(row)
     return row
+
+# Test mode is a fourth operating day isolated from days 1-3: its own pool
+# (seeds + test submissions), caps and caches, no physical stock, no permanent locks.
+def is_test(day): return day['day_no']==TEST_DAY
+def cache_key(name, test): return name+'_test' if test else name
+def pool_scope(test, prefix=''):
+    return f'({prefix}day_no={TEST_DAY} OR {prefix}is_seed=1)' if test else f'{prefix}day_no!={TEST_DAY}'
+def clear_caches(c, tests=(False, True), scores=False):
+    """Display caches only by default; score caches stay valid across name changes."""
+    for test in tests:
+        for key,value in [('board_cache','{}'),('cycle','null'),('cycle_at','')]+([('score_cache','{}')] if scores else []):
+            db.set_config(c,cache_key(key,test),value)
 
 def participant(c, token, required=True):
     row = None
@@ -97,15 +112,17 @@ def inventory(c):
         result[row['item']]=row['n']
     return result
 
-def counters(c):
-    row=c.one("SELECT COALESCE(SUM(CASE WHEN kind='BASIC' OR choice='MYCHEW' THEN 1 ELSE 0 END),0) AS mychew_used, COALESCE(SUM(CASE WHEN kind='TOP_CHOICE' AND (choice IS NULL OR choice IN ('SESAME','ACE')) THEN 1 ELSE 0 END),0) AS premium_reserved FROM entitlements WHERE status!='VOID'")
+def counters(c, test=False):
+    row=c.one(f"SELECT COALESCE(SUM(CASE WHEN e.kind='BASIC' OR e.choice='MYCHEW' THEN 1 ELSE 0 END),0) AS mychew_used, COALESCE(SUM(CASE WHEN e.kind='TOP_CHOICE' AND (e.choice IS NULL OR e.choice IN ('SESAME','ACE')) THEN 1 ELSE 0 END),0) AS premium_reserved FROM entitlements e JOIN submissions s ON s.id=e.submission_id WHERE e.status!='VOID' AND {pool_scope(test,'s.')}")
     return row
 
 def pending(c):
-    row=c.one("SELECT COALESCE(SUM(CASE WHEN kind='BASIC' OR choice='MYCHEW' THEN 1 ELSE 0 END),0) AS mychew, COALESCE(SUM(CASE WHEN kind='TOP_CHOICE' AND (choice IS NULL OR choice IN ('SESAME','ACE')) THEN 1 ELSE 0 END),0) AS premium FROM entitlements WHERE status='ISSUED'")
+    """Physical stock reservations; test entitlements never touch real stock."""
+    row=c.one(f"SELECT COALESCE(SUM(CASE WHEN e.kind='BASIC' OR e.choice='MYCHEW' THEN 1 ELSE 0 END),0) AS mychew, COALESCE(SUM(CASE WHEN e.kind='TOP_CHOICE' AND (e.choice IS NULL OR e.choice IN ('SESAME','ACE')) THEN 1 ELSE 0 END),0) AS premium FROM entitlements e JOIN submissions s ON s.id=e.submission_id WHERE e.status='ISSUED' AND {pool_scope(False,'s.')}")
     return row
 
 def schedule(day):
+    if is_test(day): return True,None
     t=now(); date=day['date']; sessions=json.loads(day['sessions_json']); local=t.strftime('%H:%M')
     within=t.date().isoformat()==date and any(start<=local<end for start,end in sessions)
     upcoming=[]
@@ -121,7 +138,7 @@ def state_in(c, token=None):
     purged=db.config(c,'purged')=='true'
     booth=day['booth_state']
     return {'day_no':day['day_no'],'booth_state':booth,'open_now':bool(booth=='OPEN' and within and not purged),
-        'next_open':next_open,'attempts_left':max(0,3-count),'mychew_left':max(0,day['mychew_cap_cum']-counters(c)['mychew_used']),
+        'next_open':next_open,'attempts_left':max(0,3-count),'mychew_left':max(0,day['mychew_cap_cum']-counters(c,is_test(day))['mychew_used']),'test_mode':is_test(day),
         'participant_id':person['id'] if person else None,'nickname':display_name(person) if person else None,
         'kind':person['kind'] if person else None,'auth_method':('GOOGLE' if person['kind']=='STUDENT' else 'GUEST') if person else None,
         'server_time':stamp(),'privacy_contact':os.getenv('PRIVACY_CONTACT','Automata 부스 운영진'),
@@ -258,7 +275,7 @@ def google_login(payload,challenge_cookie,old_token=None):
         c.execute('INSERT INTO sessions(token_hash,participant_id,role,expires_at,created_at) VALUES(?,?,?,?,?)',
                   (digest(token),person['id'],'SCHOOL',(now()+timedelta(days=30)).isoformat(),stamp()))
         person.update(real_name=name,verified_school_subject=subject)
-        db.set_config(c,'board_cache','{}');db.set_config(c,'cycle','null');db.set_config(c,'cycle_at','')
+        clear_caches(c)
         audit(c,'SCHOOL_LOGIN',details={'participant_id':person['id'],'legacy_linked':migrated});db.bump(c)
         return session_public(c,person),token
 
@@ -286,13 +303,13 @@ def admin_login(pin, ip):
         audit(c,'ADMIN_LOGIN')
     return {'ok':True},token
 
-def pool_rows(c, for_submission=False):
+def pool_rows(c, for_submission=False, test=False):
     if for_submission:
         # Submission responses need only a rank number and an anonymous nemesis.
         # Display names and historical snapshot scores are loaded by board reads.
-        rows=c.all('SELECT id,participant_id,day_no,l1,l2,l3,l4,l5,is_seed,is_ranked,submitted_at FROM submissions ORDER BY submitted_at,id')
+        rows=c.all(f'SELECT id,participant_id,day_no,l1,l2,l3,l4,l5,is_seed,is_ranked,submitted_at FROM submissions WHERE {pool_scope(test)} ORDER BY submitted_at,id')
     else:
-        rows=c.all('SELECT s.id,s.participant_id,s.day_no,s.l1,s.l2,s.l3,s.l4,s.l5,s.is_seed,s.is_ranked,s.points,s.opponents,s.submitted_at,p.nickname,p.name_hidden,p.real_name,i.google_sub AS verified_school_subject FROM submissions s LEFT JOIN participants p ON p.id=s.participant_id LEFT JOIN school_identities i ON i.participant_id=p.id ORDER BY s.submitted_at,s.id')
+        rows=c.all(f'SELECT s.id,s.participant_id,s.day_no,s.l1,s.l2,s.l3,s.l4,s.l5,s.is_seed,s.is_ranked,s.points,s.opponents,s.submitted_at,p.nickname,p.name_hidden,p.real_name,i.google_sub AS verified_school_subject FROM submissions s LEFT JOIN participants p ON p.id=s.participant_id LEFT JOIN school_identities i ON i.participant_id=p.id WHERE {pool_scope(test,"s.")} ORDER BY s.submitted_at,s.id')
     for row in rows:
         row['strategy']=[row['l1'],row['l2'],row['l3'],row['l4'],row['l5']]
         if row['participant_id'] is None: row['nickname']='시드'
@@ -300,8 +317,8 @@ def pool_rows(c, for_submission=False):
         row.pop('real_name',None);row.pop('verified_school_subject',None)
     return rows
 
-def analysis_in(c, rows):
-    analysis=json.loads(db.config(c,'score_cache','{}'))
+def analysis_in(c, rows, test=False):
+    analysis=json.loads(db.config(c,cache_key('score_cache',test),'{}'))
     if set(analysis)!=set(r['id'] for r in rows):
         analysis=engine.analyze_pool(rows)
     return analysis
@@ -325,7 +342,7 @@ def entitlement_public(e):
 
 def close_if_cap(c,day):
     if day['cap_override'] or day['booth_state']!='OPEN': return
-    count=counters(c)
+    count=counters(c,is_test(day))
     hit=count['mychew_used']>=day['mychew_cap_cum'] or (day['close_rule']=='EITHER' and count['premium_reserved']>=day['premium_cap_cum'])
     if hit: c.execute("UPDATE day_config SET booth_state='CAP_REACHED',cap_closed_at=? WHERE day_no=?",(stamp(),day['day_no']))
 
@@ -340,14 +357,14 @@ def submit(token,payload):
             need(saved['participant_id']==me['id'],'FORBIDDEN','다른 참가자의 제출 요청이에요.',403)
             need([saved['l'+str(i)] for i in range(1,6)]==strategy,'REQUEST_ID_CONFLICT','같은 제출 번호의 배분을 바꿀 수 없어요.')
             return json.loads(saved['response_json'])
-        day=get_day(c); st=state_in(c,token)
+        day=get_day(c); st=state_in(c,token); test=is_test(day)
         expected=payload.get('expected_day_no',day['day_no'])
         need(type(expected) is int and expected==day['day_no'],'DAY_CHANGED','운영일이 바뀌었어요. 배분을 확인하고 새로 제출해 주세요.')
         need(day['booth_state']!='CAP_REACHED','CAP_REACHED','오늘 간식 상한에 도달했어요.')
         need(st['open_now'],'BOOTH_CLOSED','지금은 제출할 수 없어요. 운영 시간을 확인해 주세요.')
         done=c.scalar('SELECT COUNT(*) FROM submissions WHERE participant_id=? AND day_no=?',(me['id'],day['day_no']))
         need(done<3,'LIMIT_REACHED','오늘의 도전 3회를 모두 사용했어요.')
-        rows=pool_rows(c,for_submission=True); analysis=analysis_in(c,rows)
+        rows=pool_rows(c,for_submission=True,test=test); analysis=analysis_in(c,rows,test)
         opponent_rows=[r for r in rows if r['participant_id']!=me['id']]
         need(len(opponent_rows)>=50,'POOL_TOO_SMALL','시드 준비 중이에요. 잠시 후 다시 와 주세요.',503)
         points=engine.score(strategy,[r['strategy'] for r in opponent_rows]); n=len(opponent_rows)
@@ -356,11 +373,11 @@ def submit(token,payload):
         reward=None
         if done==0:
             qualified=points*10000>=bp*2*n
-            count=counters(c); stock=inventory(c); reserved=pending(c)
-            premium_available=count['premium_reserved']<day['premium_cap_cum'] and stock['SESAME']+stock['ACE']>reserved['premium']
+            count=counters(c,test); stock=inventory(c); reserved=pending(c)
+            premium_available=count['premium_reserved']<day['premium_cap_cum'] and (test or stock['SESAME']+stock['ACE']>reserved['premium'])
             kind='TOP_CHOICE' if qualified and premium_available else 'BASIC'
             if kind=='BASIC':
-                need(count['mychew_used']<day['mychew_cap_cum'] and stock['MYCHEW']>reserved['mychew'],'CAP_REACHED','지급 가능한 마이쮸가 없어요. 스태프에게 문의해 주세요.')
+                need(count['mychew_used']<day['mychew_cap_cum'] and (test or stock['MYCHEW']>reserved['mychew']),'CAP_REACHED','지급 가능한 마이쮸가 없어요. 스태프에게 문의해 주세요.')
             reward={'id':uid(),'code':''.join(secrets.choice('23456789ABCDEFGHJKLMNPQRSTUVWXYZ') for _ in range(6)),'kind':kind,'premium_exhausted':int(qualified and not premium_available),'choice':None,'status':'ISSUED','claimed_at':None}
             while c.one('SELECT id FROM entitlements WHERE code=?',(reward['code'],)):
                 reward['code']=''.join(secrets.choice('23456789ABCDEFGHJKLMNPQRSTUVWXYZ') for _ in range(6))
@@ -375,7 +392,7 @@ def submit(token,payload):
             'rank_estimate':{'rank':myrank,'of':len(ranking),'is_provisional':True},'reward':entitlement_public(reward),
             'nemesis':engine.nemesis(strategy,allrows,participant_id=me['id'],analysis=analysis),'pool_size':len(allrows)}
         c.execute('UPDATE submissions SET response_json=? WHERE id=?',(dumps(resp),new['id']))
-        db.set_config(c,'score_cache',dumps(analysis)); close_if_cap(c,day); db.bump(c)
+        db.set_config(c,cache_key('score_cache',test),dumps(analysis)); close_if_cap(c,day); db.bump(c)
         return resp
 
 def history(token):
@@ -404,19 +421,26 @@ def select_in(c,e,choice):
     pending-item check makes retrying the same selection naturally idempotent.
     """
     need(choice in ITEMS and (e['kind']=='TOP_CHOICE' or choice=='MYCHEW'),'INVALID_CHOICE','간식을 골라 주세요.',400)
-    day=get_day(c);count=counters(c);stock=inventory(c)
-    specific=c.scalar("SELECT COUNT(*) FROM entitlements WHERE status='ISSUED' AND id!=? AND (choice=? OR (kind='BASIC' AND ?='MYCHEW'))",(e['id'],choice,choice))
-    need(stock[choice]>specific,'OUT_OF_STOCK_CHOICE','고른 간식이 소진되었거나 예약 중이에요. 다른 간식을 골라 주세요.')
+    # Caps follow the entitlement's own mode, even if the admin has since switched days.
+    test=e['day_no']==TEST_DAY
+    day=get_day(c);caps=day
+    if test!=is_test(day):
+        caps=c.one('SELECT * FROM day_config WHERE day_no=?',(TEST_DAY if test else int(db.config(c,'real_day','1')),))
+    count=counters(c,test);stock=inventory(c)
+    if not test:
+        specific=c.scalar(f"SELECT COUNT(*) FROM entitlements e JOIN submissions s ON s.id=e.submission_id WHERE e.status='ISSUED' AND e.id!=? AND (e.choice=? OR (e.kind='BASIC' AND ?='MYCHEW')) AND {pool_scope(False,'s.')}",(e['id'],choice,choice))
+        need(stock[choice]>specific,'OUT_OF_STOCK_CHOICE','고른 간식이 소진되었거나 예약 중이에요. 다른 간식을 골라 주세요.')
     old_group='MYCHEW' if e['kind']=='BASIC' or e['choice']=='MYCHEW' else 'PREMIUM'
     new_group='MYCHEW' if choice=='MYCHEW' else 'PREMIUM'
     if new_group=='MYCHEW':
         additional=int(old_group!='MYCHEW')
-        need(count['mychew_used']+additional<=day['mychew_cap_cum'],'OUT_OF_STOCK_CHOICE','마이쮸 상한에 도달했어요. 다른 간식을 골라 주세요.')
+        need(count['mychew_used']+additional<=caps['mychew_cap_cum'],'OUT_OF_STOCK_CHOICE','마이쮸 상한에 도달했어요. 다른 간식을 골라 주세요.')
     else:
         additional=int(old_group!='PREMIUM')
-        need(count['premium_reserved']+additional<=day['premium_cap_cum'],'OUT_OF_STOCK_CHOICE','고급 간식 상한에 도달했어요. 마이쮸를 골라 주세요.')
-        other_premium=c.scalar("SELECT COUNT(*) FROM entitlements WHERE status='ISSUED' AND id!=? AND kind='TOP_CHOICE' AND (choice IS NULL OR choice IN ('SESAME','ACE'))",(e['id'],))
-        need(stock['SESAME']+stock['ACE']>other_premium,'OUT_OF_STOCK_CHOICE','고급 간식 여유가 없어요. 마이쮸를 골라 주세요.')
+        need(count['premium_reserved']+additional<=caps['premium_cap_cum'],'OUT_OF_STOCK_CHOICE','고급 간식 상한에 도달했어요. 마이쮸를 골라 주세요.')
+        if not test:
+            other_premium=c.scalar(f"SELECT COUNT(*) FROM entitlements e JOIN submissions s ON s.id=e.submission_id WHERE e.status='ISSUED' AND e.id!=? AND e.kind='TOP_CHOICE' AND (e.choice IS NULL OR e.choice IN ('SESAME','ACE')) AND {pool_scope(False,'s.')}",(e['id'],))
+            need(stock['SESAME']+stock['ACE']>other_premium,'OUT_OF_STOCK_CHOICE','고급 간식 여유가 없어요. 마이쮸를 골라 주세요.')
     if e['choice']!=choice:
         c.execute('UPDATE entitlements SET choice=? WHERE id=?',(choice,e['id']))
         e['choice']=choice
@@ -438,36 +462,37 @@ def claim(token,entitlement_id,payload):
         day=select_in(c,e,choice)
         claimed_at=stamp()
         c.execute("UPDATE entitlements SET status='CLAIMED',choice=?,claimed_at=? WHERE id=?",(choice,claimed_at,entitlement_id))
-        c.execute('INSERT INTO inventory_ledger(id,item,delta,reason,entitlement_id,at) VALUES(?,?,-1,?,?,?)',(uid(),choice,'CLAIM',entitlement_id,claimed_at))
+        if e['day_no']!=TEST_DAY:
+            c.execute('INSERT INTO inventory_ledger(id,item,delta,reason,entitlement_id,at) VALUES(?,?,-1,?,?,?)',(uid(),choice,'CLAIM',entitlement_id,claimed_at))
         close_if_cap(c,day);db.bump(c)
         return {'status':'CLAIMED','choice':choice,'claimed_at':claimed_at,'code':e['code'],'entitlement_id':e['id']}
 
 def board():
     with db.transaction() as c:
-        version=int(db.config(c,'version','0'))
-        cached=json.loads(db.config(c,'board_cache','{}'))
+        version=int(db.config(c,'version','0')); test=is_test(get_day(c))
+        cached=json.loads(db.config(c,cache_key('board_cache',test),'{}'))
         if cached.get('version')==version:
             return cached
     with db.transaction(write=True) as c:
-        version=int(db.config(c,'version','0'))
-        cached=json.loads(db.config(c,'board_cache','{}'))
+        version=int(db.config(c,'version','0')); day=get_day(c); test=is_test(day)
+        cached=json.loads(db.config(c,cache_key('board_cache',test),'{}'))
         if cached.get('version')==version:
             return cached
-        rows=pool_rows(c); analysis=analysis_in(c,rows); ranked=engine.rank_rows(rows,analysis=analysis)
-        cycle=json.loads(db.config(c,'cycle','null')); cycle_at=db.config(c,'cycle_at','')
+        rows=pool_rows(c,test=test); analysis=analysis_in(c,rows,test); ranked=engine.rank_rows(rows,analysis=analysis)
+        cycle=json.loads(db.config(c,cache_key('cycle',test),'null')); cycle_at=db.config(c,cache_key('cycle_at',test),'')
         if not cycle or not cycle_at or (now()-datetime.fromisoformat(cycle_at)).total_seconds()>=60:
-            cycle=engine.find_cycle(ranked[:30]); db.set_config(c,'cycle',dumps(cycle)); db.set_config(c,'cycle_at',stamp())
+            cycle=engine.find_cycle(ranked[:30]); db.set_config(c,cache_key('cycle',test),dumps(cycle)); db.set_config(c,cache_key('cycle_at',test),stamp())
         if cycle:
             names={r['participant_id']:r['nickname'] for r in ranked}
             for row in cycle: row['nickname']=names.get(row['participant_id'],'익명 전술가')
-        day=get_day(c); recent=[]
+        recent=[]
         for row in reversed(rows):
             if row['is_ranked'] and row['participant_id'] is not None:
                 recent.append({'nickname':row['nickname'],'strategy':row['strategy'],'win_rate':row['points']/(2*row['opponents']) if row['opponents'] else 0,'submitted_at':row['submitted_at']})
                 if len(recent)==6: break
         data={'rankings':ranked[:10],'cycle':cycle,'recent':recent,'day_no':day['day_no'],'booth_state':day['booth_state'],
-            'mychew_left':max(0,day['mychew_cap_cum']-counters(c)['mychew_used']),'pool_size':len(rows),'updated_at':stamp(),'version':int(db.config(c,'version','0'))}
-        db.set_config(c,'board_cache',dumps(data))
+            'mychew_left':max(0,day['mychew_cap_cum']-counters(c,test)['mychew_used']),'pool_size':len(rows),'updated_at':stamp(),'version':int(db.config(c,'version','0')),'test_mode':test}
+        db.set_config(c,cache_key('board_cache',test),dumps(data))
         return data
 
 def hall_in(c,scope):
@@ -483,31 +508,37 @@ def hall(scope):
     with db.transaction() as c: return hall_in(c,scope)
 
 def dashboard_in(c):
-    day=get_day(c)
+    day=get_day(c); test=is_test(day)
     return {'day_no':day['day_no'],'day':day_public(day),'days':[day_public(r) for r in c.all('SELECT * FROM day_config ORDER BY day_no')],
-        'state':state_in(c),'counters':counters(c),'inventory':inventory(c),'pool_size':c.scalar('SELECT COUNT(*) FROM submissions'),
+        'state':state_in(c),'counters':counters(c,test),'inventory':inventory(c),'pool_size':c.scalar(f'SELECT COUNT(*) FROM submissions WHERE {pool_scope(test)}'),
         'seed_count':c.scalar('SELECT COUNT(*) FROM submissions WHERE is_seed=1'),'participant_count':c.scalar('SELECT COUNT(*) FROM participants'),
-        'submission_count':c.scalar('SELECT COUNT(*) FROM submissions WHERE is_seed=0'),
+        'submission_count':c.scalar(f'SELECT COUNT(*) FROM submissions WHERE is_seed=0 AND {pool_scope(test)}'),
         'today_submissions':c.scalar('SELECT COUNT(*) FROM submissions WHERE is_seed=0 AND day_no=?',(day['day_no'],)),
-        'threshold_bp':threshold(c,day['day_no']),'threshold_locked':bool(day['ever_opened'] or day['threshold_applied']),
-        'threshold_applied':bool(day['threshold_applied']),'purged':db.config(c,'purged')=='true','db_mode':'postgresql' if c.postgres else 'sqlite'}
+        'threshold_bp':threshold(c,day['day_no']),'threshold_locked':not test and bool(day['ever_opened'] or day['threshold_applied']),
+        'threshold_applied':bool(day['threshold_applied']),'purged':db.config(c,'purged')=='true','db_mode':'postgresql' if c.postgres else 'sqlite',
+        'test_mode':test,'test_day':TEST_DAY,'test_submissions':c.scalar('SELECT COUNT(*) FROM submissions WHERE day_no=?',(TEST_DAY,))}
 
 def dashboard(token):
     with db.transaction() as c: require_admin(c,token); return dashboard_in(c)
 
 def choose_day(token,payload):
     value=payload.get('day_no')
-    need(type(value) is int and value in (1,2,3),'INVALID_DAY','운영일은 1~3일차예요.',400)
+    need(type(value) is int and value in REAL_DAYS+(TEST_DAY,),'INVALID_DAY','운영일은 1~3일차 또는 테스트 모드예요.',400)
     with db.transaction(write=True) as c:
         require_admin(c,token); current=get_day(c)
         need(current['booth_state'] not in ('OPEN','PAUSED'),'DAY_BUSY','현재 운영일을 마감한 뒤 전환해 주세요.')
-        need(value>=current['day_no'] or not c.scalar('SELECT COUNT(*) FROM submissions WHERE is_seed=0'),'INVALID_DAY','제출 기록이 있으면 지난 운영일로 돌아갈 수 없어요.')
+        # Visiting test mode never counts as moving forward: compare with the last real day.
+        last_real=int(db.config(c,'real_day','1')) if is_test(current) else current['day_no']
+        if value!=TEST_DAY:
+            need(value>=last_real or not c.scalar(f'SELECT COUNT(*) FROM submissions WHERE is_seed=0 AND {pool_scope(False)}'),'INVALID_DAY','제출 기록이 있으면 지난 운영일로 돌아갈 수 없어요.')
+            last_real=value
+        db.set_config(c,'real_day',last_real)
         db.set_config(c,'active_day',value); audit(c,'DAY_SELECTED',details={'day_no':value}); db.bump(c)
         return dashboard_in(c)
 
 def configure_day(token,payload):
     reason=reason_text(payload); day_no=payload.get('day_no'); date=payload.get('date'); sessions=payload.get('sessions')
-    need(type(day_no) is int and day_no in (1,2,3),'INVALID_DAY','운영일을 확인해 주세요.',400)
+    need(type(day_no) is int and day_no in REAL_DAYS+(TEST_DAY,),'INVALID_DAY','운영일을 확인해 주세요.',400)
     try:
         parsed=datetime.strptime(date,'%Y-%m-%d').date(); need(parsed.isoformat()==date,'INVALID_INPUT','날짜를 확인해 주세요.',400)
     except (ValueError,TypeError): raise GameError('INVALID_INPUT','날짜를 확인해 주세요.',400)
@@ -521,8 +552,8 @@ def configure_day(token,payload):
     need(rule in ('EITHER','PREMIUM_SOFT'),'INVALID_INPUT','마감 규칙을 확인해 주세요.',400)
     with db.transaction(write=True) as c:
         require_admin(c,token); day=c.one('SELECT * FROM day_config WHERE day_no=?',(day_no,))
-        need(not day['ever_opened'],'CONFIG_LOCKED','개장한 운영일의 설정은 바꿀 수 없어요.')
-        other=c.all('SELECT * FROM day_config WHERE day_no!=?',(day_no,))
+        need(is_test(day) or not day['ever_opened'],'CONFIG_LOCKED','개장한 운영일의 설정은 바꿀 수 없어요.')
+        other=[] if is_test(day) else c.all('SELECT * FROM day_config WHERE day_no!=? AND day_no!=?',(day_no,TEST_DAY))
         for d in other:
             if d['day_no']<day_no: need(d['mychew_cap_cum']<=chew and d['premium_cap_cum']<=premium,'INVALID_CAP','누적 상한은 전날보다 작을 수 없어요.',400)
             else: need(d['mychew_cap_cum']>=chew and d['premium_cap_cum']>=premium,'INVALID_CAP','누적 상한은 다음 날보다 클 수 없어요.',400)
@@ -541,7 +572,7 @@ def booth(token,payload):
             need(c.scalar('SELECT COUNT(*) FROM submissions WHERE is_seed=1')>=50,'POOL_TOO_SMALL','부원이 작성한 시드 50개 이상이 필요해요.',503)
             need(day['threshold_applied'],'THRESHOLD_REQUIRED','개장 전에 임계값을 적용해 주세요.')
             stock=inventory(c)
-            has_stock=(stock['MYCHEW']>0 or stock['SESAME']+stock['ACE']>0) if action=='REOPEN' else (stock['MYCHEW']>0 and stock['SESAME']+stock['ACE']>0)
+            has_stock=is_test(day) or ((stock['MYCHEW']>0 or stock['SESAME']+stock['ACE']>0) if action=='REOPEN' else (stock['MYCHEW']>0 and stock['SESAME']+stock['ACE']>0))
             need(has_stock,'STOCK_REQUIRED','지급 가능한 실물 재고를 입력해 주세요.')
             if action=='OPEN': need(day['booth_state'] in ('CLOSED','PAUSED','OPEN'),'REOPEN_REQUIRED','재개방 버튼과 사유를 사용해 주세요.')
             c.execute("UPDATE day_config SET booth_state='OPEN',ever_opened=1,cap_override=? WHERE day_no=?",(int(action=='REOPEN') or day['cap_override'],day['day_no']))
@@ -555,9 +586,9 @@ def booth(token,payload):
 
 def suggest(token):
     with db.transaction() as c:
-        require_admin(c,token); rows=pool_rows(c)
+        require_admin(c,token); test=is_test(get_day(c)); rows=pool_rows(c,test=test)
         need(len(rows)>=2,'POOL_TOO_SMALL','추천값 계산에는 전략 2개 이상이 필요해요.',503)
-        return {'value_bp':engine.threshold_suggestion(rows,analysis=analysis_in(c,rows)),'percentile':85,'pool_size':len(rows)}
+        return {'value_bp':engine.threshold_suggestion(rows,analysis=analysis_in(c,rows,test)),'percentile':85,'pool_size':len(rows)}
 
 def set_threshold(token,payload):
     value=payload.get('value_bp'); reason=reason_text(payload); source=payload.get('source','MANUAL')
@@ -565,7 +596,7 @@ def set_threshold(token,payload):
     need(source in ('MANUAL','SUGGESTION'),'INVALID_INPUT','설정 출처를 확인해 주세요.',400)
     with db.transaction(write=True) as c:
         require_admin(c,token); day=get_day(c)
-        need(not day['ever_opened'] and day['booth_state']=='CLOSED' and not day['threshold_applied'],'THRESHOLD_LOCKED','임계값은 개장 전 한 번만 적용할 수 있어요.')
+        need(is_test(day) or (not day['ever_opened'] and day['booth_state']=='CLOSED' and not day['threshold_applied']),'THRESHOLD_LOCKED','임계값은 개장 전 한 번만 적용할 수 있어요.')
         c.execute('INSERT INTO threshold_history(id,day_no,value_bp,source,reason,set_by,set_at) VALUES(?,?,?,?,?,?,?)',(uid(),day['day_no'],value,source,reason,'ADMIN',stamp()))
         c.execute('UPDATE day_config SET threshold_applied=1 WHERE day_no=?',(day['day_no'],))
         audit(c,'THRESHOLD_SET',reason,{'value_bp':value,'day_no':day['day_no'],'source':source}); db.bump(c)
@@ -592,7 +623,7 @@ def add_seeds(token,payload,single=False):
         need(isinstance(item.get('tag',''),str) and len(item.get('tag',''))<=40 and isinstance(item.get('author',''),str) and len(item.get('author',''))<=40,'INVALID_INPUT','유형과 작성자는 40자 이내예요.',400)
     with db.transaction(write=True) as c:
         require_admin(c,token)
-        need(not c.scalar('SELECT COUNT(*) FROM day_config WHERE ever_opened=1'),'SEEDS_LOCKED','시드는 행사 최초 개장 전에만 넣을 수 있어요.')
+        need(not c.scalar('SELECT COUNT(*) FROM day_config WHERE ever_opened=1 AND day_no!=?',(TEST_DAY,)),'SEEDS_LOCKED','시드는 행사 최초 개장 전에만 넣을 수 있어요.')
         last_id=None
         for item in items:
             last_id=uid();c.execute('INSERT INTO submissions(id,request_id,participant_id,day_no,attempt_no,l1,l2,l3,l4,l5,is_seed,is_ranked,submitted_at,tag,author) VALUES(?,?,NULL,0,NULL,?,?,?,?,?,1,0,?,?,?)',(last_id,'seed-'+last_id,*item['strategy'],stamp(),item.get('tag',''),item.get('author','')))
@@ -631,10 +662,11 @@ def void_entitlement(token,entitlement_id,payload):
     reason=reason_text(payload);return_stock=payload.get('return_stock',False)
     need(type(return_stock) is bool,'INVALID_INPUT','실물 반환 여부를 확인해 주세요.',400)
     with db.transaction(write=True) as c:
-        require_admin(c,token);e=c.one('SELECT * FROM entitlements WHERE id=?',(entitlement_id,))
+        require_admin(c,token);e=c.one('SELECT e.*,s.day_no FROM entitlements e JOIN submissions s ON s.id=e.submission_id WHERE e.id=?',(entitlement_id,))
         need(e is not None,'NOT_FOUND','수령권을 찾을 수 없어요.',404);need(e['status']!='VOID','ALREADY_VOID','이미 무효 처리됐어요.')
         if return_stock:
             need(e['status']=='CLAIMED','INVALID_INPUT','수령된 간식만 실물 반환할 수 있어요.',400)
+            need(e['day_no']!=TEST_DAY,'INVALID_INPUT','테스트 수령권은 실물 재고와 관계없어요.',400)
             c.execute('INSERT INTO inventory_ledger(id,item,delta,reason,entitlement_id,at) VALUES(?,?,1,?,?,?)',(uid(),e['choice'],'VOID_RETURN',e['id'],stamp()))
         c.execute("UPDATE entitlements SET status='VOID' WHERE id=?",(e['id'],));audit(c,'ENTITLEMENT_VOID',reason,{'id':e['id'],'return_stock':return_stock});db.bump(c)
         return {'ok':True}
@@ -692,30 +724,49 @@ def purge(token,payload):
             for entry in entries:entry['nickname']='익명 전술가'
             c.execute('UPDATE rank_freeze SET rankings_json=? WHERE scope=?',(dumps(entries),row['scope']))
         c.execute("UPDATE day_config SET booth_state='DONE'")
-        db.set_config(c,'cycle','null');db.set_config(c,'cycle_at','');db.set_config(c,'board_cache','{}');db.set_config(c,'purged','true')
+        clear_caches(c);db.set_config(c,'purged','true')
         audit(c,'PRIVACY_PURGED',details={'participants':count});db.bump(c)
         return {'ok':True,'participants':count,'backups_require_deletion':True}
 
 def reset(token,payload):
     need(payload.get('confirm')=='RESET','CONFIRM_REQUIRED','RESET을 직접 입력해 주세요.',400);reason=reason_text(payload)
     with db.transaction(write=True) as c:
-        require_admin(c,token);need(not c.scalar('SELECT COUNT(*) FROM day_config WHERE ever_opened=1'),'RESET_LOCKED','개장 후에는 초기화할 수 없어요.')
+        require_admin(c,token);need(not c.scalar('SELECT COUNT(*) FROM day_config WHERE ever_opened=1 AND day_no!=?',(TEST_DAY,)),'RESET_LOCKED','개장 후에는 초기화할 수 없어요.')
         for table in ('school_identities','google_login_challenges','participants','submissions','entitlements','threshold_history','inventory_ledger','rank_freeze','rate_limits'):
             c.execute('DELETE FROM '+table)
-        c.execute("DELETE FROM sessions WHERE role!='ADMIN'");c.execute("UPDATE day_config SET booth_state='CLOSED',threshold_applied=0,cap_override=0,cap_closed_at=NULL,frozen_at=NULL")
-        for key,value in [('active_day','1'),('score_cache','{}'),('board_cache','{}'),('cycle','null'),('cycle_at',''),('purged','false')]:db.set_config(c,key,value)
+        c.execute("DELETE FROM sessions WHERE role!='ADMIN'");c.execute("UPDATE day_config SET booth_state='CLOSED',ever_opened=0,threshold_applied=0,cap_override=0,cap_closed_at=NULL,frozen_at=NULL")
+        for key,value in [('active_day','1'),('real_day','1'),('purged','false')]:db.set_config(c,key,value)
+        clear_caches(c,scores=True)
         audit(c,'RESET',reason);db.bump(c);return {'ok':True}
+
+def clear_test(token):
+    """Erase test-mode play so the real days start clean. Seeds and days 1-3 are untouched."""
+    with db.transaction(write=True) as c:
+        require_admin(c,token)
+        count=c.scalar('SELECT COUNT(*) FROM submissions WHERE day_no=?',(TEST_DAY,))
+        # Guests who only ever played in test mode are test accounts; school accounts stay.
+        guests=[r['id'] for r in c.all("SELECT p.id FROM participants p WHERE p.kind='GUEST' AND EXISTS(SELECT 1 FROM submissions s WHERE s.participant_id=p.id AND s.day_no=?) AND NOT EXISTS(SELECT 1 FROM submissions s WHERE s.participant_id=p.id AND s.day_no!=?)",(TEST_DAY,TEST_DAY))]
+        c.execute('DELETE FROM entitlements WHERE submission_id IN (SELECT id FROM submissions WHERE day_no=?)',(TEST_DAY,))
+        c.execute('DELETE FROM submissions WHERE day_no=?',(TEST_DAY,))
+        c.execute('DELETE FROM threshold_history WHERE day_no=?',(TEST_DAY,))
+        for pid in guests:
+            c.execute('DELETE FROM sessions WHERE participant_id=?',(pid,));c.execute('DELETE FROM participants WHERE id=?',(pid,))
+        c.execute("UPDATE day_config SET booth_state='CLOSED',ever_opened=0,threshold_applied=0,cap_override=0,cap_closed_at=NULL,frozen_at=NULL WHERE day_no=?",(TEST_DAY,))
+        clear_caches(c,tests=(True,),scores=True)
+        audit(c,'TEST_CLEARED',details={'submissions':count,'guests':len(guests)});db.bump(c)
+        return dashboard_in(c)
 
 def export_data(token):
     with db.transaction(write=True) as c:
         require_admin(c,token)
         # Exports are operational, not identity backups. No personal identity or session material.
         tables={}
-        tables['submissions']=c.all('SELECT id,day_no,attempt_no,l1,l2,l3,l4,l5,is_seed,is_ranked,points,opponents,threshold_bp_used,submitted_at FROM submissions ORDER BY submitted_at')
-        tables['entitlements']=c.all('SELECT * FROM entitlements ORDER BY issued_at')
+        # Test-mode play is rehearsal data, not event records.
+        tables['submissions']=c.all(f'SELECT id,day_no,attempt_no,l1,l2,l3,l4,l5,is_seed,is_ranked,points,opponents,threshold_bp_used,submitted_at FROM submissions WHERE {pool_scope(False)} ORDER BY submitted_at')
+        tables['entitlements']=c.all(f"SELECT e.* FROM entitlements e JOIN submissions s ON s.id=e.submission_id WHERE {pool_scope(False,'s.')} ORDER BY e.issued_at")
         tables['inventory_ledger']=c.all('SELECT * FROM inventory_ledger ORDER BY at')
-        tables['threshold_history']=c.all('SELECT id,day_no,value_bp,source,set_at FROM threshold_history ORDER BY set_at')
-        tables['day_config']=c.all('SELECT * FROM day_config ORDER BY day_no')
+        tables['threshold_history']=c.all('SELECT id,day_no,value_bp,source,set_at FROM threshold_history WHERE day_no!=? ORDER BY set_at',(TEST_DAY,))
+        tables['day_config']=c.all('SELECT * FROM day_config WHERE day_no!=? ORDER BY day_no',(TEST_DAY,))
         tables['rank_freeze']=[]
         for row in c.all('SELECT * FROM rank_freeze'):
             entries=json.loads(row['rankings_json'])

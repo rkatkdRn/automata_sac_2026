@@ -14,6 +14,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 LOCK_ID = 1010502026
+# Rehearsal operating day. Seeds already use day_no 0, so the test day must not.
+TEST_DAY = 9
 _INIT_LOCK = threading.Lock()
 _INITIALIZED: set[str] = set()
 _WRITE_LOCKS: dict[str, threading.Lock] = {}
@@ -160,7 +162,7 @@ def initialize(force=False):
                 conn.execute('BEGIN IMMEDIATE')
             for stmt in SCHEMA.split(';'):
                 if stmt.strip(): conn.execute(stmt)
-            for day, date, chew, premium in [(1,'2026-10-30',188,40),(2,'2026-10-31',338,72),(3,'2026-11-01',450,95)]:
+            for day, date, chew, premium in [(1,'2026-10-30',188,40),(2,'2026-10-31',338,72),(3,'2026-11-01',450,95),(TEST_DAY,'2026-10-27',188,40)]:
                 conn.execute('INSERT INTO day_config(day_no,date,sessions_json,mychew_cap_cum,premium_cap_cum) VALUES(?,?,?,?,?) ON CONFLICT(day_no) DO NOTHING', (day,date,'[["10:00","13:00"],["14:00","17:00"]]',chew,premium))
             for key,value in [('active_day','1'),('version','0'),('score_cache','{}'),('board_cache','{}'),('cycle','null'),('cycle_at',''),('purged','false')]:
                 conn.execute('INSERT INTO app_config(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING',(key,value))

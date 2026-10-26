@@ -204,6 +204,8 @@ def create_app():
         response=JSONResponse(s.purge(admin(request),payload));response.delete_cookie(s.COOKIE,path='/');response.delete_cookie(s.ADMIN_COOKIE,path='/');response.delete_cookie(s.GOOGLE_CHALLENGE_COOKIE,path='/');return response
     @app.post('/api/admin/reset')
     def reset(request:Request,payload:dict=Body(...)):return s.reset(admin(request),payload)
+    @app.post('/api/admin/test/clear')
+    def clear_test(request:Request):return s.clear_test(admin(request))
 
     @app.get('/api/admin/backup')
     def backup(request:Request):

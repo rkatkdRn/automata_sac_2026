@@ -564,3 +564,64 @@ def test_30_concurrent_submissions_1700_pool(booth):
     latencies = sorted(ms for _, ms in results)
     label = "PostgreSQL" if booth.postgres else "SQLite"
     print(f"30 simultaneous API submissions, initial pool 1700 (50 seeds + 550 ranked people x3): p95={latencies[28]:.1f} ms, max={latencies[-1]:.1f} ms ({label}/TestClient), errors=0; all1730 cached point totals match full recomputation")
+
+
+TEST_DAY = 9
+
+
+def test_test_mode_is_isolated_and_leaves_real_days_unlocked(booth):
+    admin = booth.admin
+    ok(admin.post("/api/admin/day", json={"day_no": TEST_DAY}))
+    # Outside every real date and session: test mode ignores the schedule.
+    booth.clock[0] = datetime(2026, 10, 27, 22, 0, tzinfo=KST)
+    booth.open(threshold=0)
+    guest = booth.guest("시험손님")
+    assert ok(guest.get("/api/state"))["test_mode"] is True
+    first = ok(booth.submit(guest, WIN))
+    assert first["opponents"] == 50 and first["reward"]["kind"] == "TOP_CHOICE"
+    stock = ok(admin.get("/api/admin/inventory"))["inventory"]
+    ok(guest.post(f"/api/entitlements/{first['reward']['entitlement_id']}/claim", json={"choice": "ACE"}))
+    assert ok(admin.get("/api/admin/inventory"))["inventory"] == stock
+    ok(booth.submit(guest))
+    ok(booth.submit(guest))
+    error(booth.submit(guest), "LIMIT_REACHED")
+    # The test threshold stays editable while the test booth is open.
+    ok(admin.post("/api/admin/threshold", json={"value_bp": 7200, "source": "MANUAL", "reason": "테스트 재설정"}))
+    dashboard = ok(admin.get("/api/admin/dashboard"))
+    assert dashboard["test_mode"] and dashboard["counters"]["premium_reserved"] == 1
+    assert dashboard["test_submissions"] == 3 and not dashboard["threshold_locked"]
+
+    ok(admin.post("/api/admin/booth", json={"action": "CLOSE"}))
+    assert ok(admin.post("/api/admin/test/clear", json={}))["test_submissions"] == 0
+    assert ok(guest.get("/api/state"))["participant_id"] is None
+    ok(admin.post("/api/admin/day", json={"day_no": 1}))
+    dashboard = ok(admin.get("/api/admin/dashboard"))
+    assert dashboard["counters"] == {"mychew_used": 0, "premium_reserved": 0}
+    assert dashboard["pool_size"] == 50 and not dashboard["threshold_locked"]
+    booth.configure()
+    ok(admin.post("/api/admin/seeds", json={"strategy": TIE, "tag": "추가", "author": "부원"}))
+    booth.clock[0] = datetime(2026, 10, 30, 10, 30, tzinfo=KST)
+    booth.open()
+    assert ok(booth.submit(booth.guest("실제손님")))["opponents"] == 51
+
+
+def test_test_mode_between_real_days_keeps_pools_and_day_order(booth):
+    admin = booth.admin
+    booth.open()
+    ok(booth.submit(booth.guest("일차손님"), WIN))
+    error(admin.post("/api/admin/day", json={"day_no": TEST_DAY}), "DAY_BUSY")
+    ok(admin.post("/api/admin/booth", json={"action": "CLOSE"}))
+    ok(admin.post("/api/admin/day", json={"day_no": TEST_DAY}))
+    booth.open(threshold=0)
+    result = ok(booth.submit(booth.guest("시험둘")))
+    assert result["opponents"] == 50 and result["pool_size"] == 51
+    board = ok(admin.get("/api/scoreboard"))
+    assert board["test_mode"] and [r["nickname"] for r in board["rankings"]] == ["시험둘"]
+    ok(admin.post("/api/admin/booth", json={"action": "CLOSE"}))
+    ok(admin.post("/api/admin/day", json={"day_no": 1}))
+    assert [r["nickname"] for r in ok(admin.get("/api/scoreboard"))["rankings"]] == ["일차손님"]
+    ok(admin.post("/api/admin/day", json={"day_no": 2}))
+    ok(admin.post("/api/admin/day", json={"day_no": TEST_DAY}))
+    # Visiting test mode is not a way back to an earlier real day.
+    error(admin.post("/api/admin/day", json={"day_no": 1}), "INVALID_DAY")
+    ok(admin.post("/api/admin/day", json={"day_no": 2}))

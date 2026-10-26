@@ -38,4 +38,11 @@ All errors: `{error:{code,message}}`. Cookie authentication; POST JSON. IDs are 
 - GET `/api/admin/backup` → consistent anonymous JSON operational export (restore_supported:false). Full database backups require the supplied local backup script.
 - GET `/api/admin/qr` → SVG QR for PUBLIC_BASE_URL or request origin.
 - POST `/api/admin/purge` `{confirm:"PURGE",reason}` → `{ok:true,participants:n,backups_require_deletion:true}`. Deletes sessions, identifying fields and pseudonymizes all names including frozen rankings/cached responses; irreversible; booth closed.
-- POST `/api/admin/reset` `{confirm:"RESET",reason}` → `{ok:true}`. Only before any operating day has ever opened.
+- POST `/api/admin/reset` `{confirm:"RESET",reason}` → `{ok:true}`. Only before any operating day (1–3) has ever opened.
+
+## Test mode (`day_no` 9)
+- Select it with POST `/api/admin/day` `{day_no:9}` (current day must not be OPEN/PAUSED). `state`, `scoreboard` and `dashboard` report `test_mode:true`; `days[].is_test` marks it.
+- Ignores date/sessions (open whenever the booth is OPEN). Still needs ≥50 seeds and a threshold; physical stock is not required and claims never write the inventory ledger.
+- Pool = seeds + test submissions only; caps and counters count test entitlements only. Real days never see test submissions.
+- Its threshold and day config stay editable after opening. Opening it does not lock seeds, RESET, or days 1–3. Visiting it never allows returning to an earlier real day. Not freezable; excluded from exports.
+- POST `/api/admin/test/clear` `{}` → dashboard. Deletes test submissions, entitlements and thresholds, deletes guests who only played in test mode, and resets the test day to CLOSED.
