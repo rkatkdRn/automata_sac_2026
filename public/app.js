@@ -297,7 +297,7 @@ async function boot(){
   $('#privacy-link').onclick=privacyDialog;setInterval(tickClocks,1000);
   try{
     const route=location.pathname;
-    if(route.startsWith('/admin')){currentView='admin';const module=await import('/admin.js?v=test-mode-20261027');await module.mountAdmin(app);return;}
+    if(route.startsWith('/admin')){currentView='admin';const module=await import('/admin.js?v=test-mode-20261027-r2');await module.mountAdmin(app);return;}
     if(route==='/board'){renderBoard(await api('/api/scoreboard'));startLive();try{await navigator.wakeLock?.request('screen');}catch{}return;}
     state=await api('/api/state');
     if(route==='/hall'){hallScope=state.test_mode?'DAY1':`DAY${state.day_no||1}`;await loadHall();startLive();return;}
