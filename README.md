@@ -37,7 +37,7 @@ Vercel은 화면뿐 아니라 Python API도 실행할 수 있습니다. 다만 �
 ### B. 무료 PostgreSQL 만들기
 
 1. [Neon](https://neon.com)에 가입하고 **Free** 프로젝트를 만듭니다. 유료 업그레이드를 선택할 필요는 없습니다.
-2. Vercel 함수의 기본 설정은 Tokyo (`hnd1`)입니다. Neon에서 Tokyo를 선택할 수 있으면 같은 지역으로 맞춥니다. 다른 지역을 사용한다면 `vercel.json`의 region도 가까운 지역으로 바꾸세요.
+2. Neon에는 일본·한국 지역이 없어 아시아에서는 Singapore (`aws-ap-southeast-1`)가 가장 가깝습니다. Vercel 함수도 같은 Singapore (`sin1`)로 설정되어 있습니다. 제출 한 건이 DB를 20여 번 왕복하므로 함수와 DB가 다른 지역이면 제출마다 수 초가 걸립니다(서울↔Singapore 약 100ms/왕복 측정). 다른 Neon 지역을 쓰면 `vercel.json`의 region도 그 지역으로 맞추세요.
 3. 프로젝트의 **Connect** 화면에서 데이터베이스와 역할을 선택하고 **Connection pooling**을 켭니다.
 4. `postgresql://...` 형식의 연결 문자열을 복사합니다. 보통 호스트에 `-pooler`가 들어가며 SSL 옵션이 붙어 있습니다. 이것이 `DATABASE_URL` 값입니다. 값 전체는 비밀번호이므로 채팅이나 저장소에 붙여넣지 마세요.
 5. 백업용으로 pooling을 끈 직접 연결 문자열도 따로 보관합니다. 운영 노트북의 `DATABASE_URL_UNPOOLED`에만 설정하면 됩니다.

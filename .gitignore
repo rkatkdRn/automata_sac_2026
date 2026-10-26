@@ -17,3 +17,4 @@ backup/
 test-results/
 .openai/
 .runtime/
+.neon

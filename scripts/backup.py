@@ -31,6 +31,8 @@ def load_environment():
         from dotenv import load_dotenv
     except ImportError:
         return
+    # `neon deploy` writes .env.local; it wins over .env, and real env vars win over both.
+    load_dotenv(ROOT / '.env.local', override=False)
     load_dotenv(ROOT / '.env', override=False)
 
 
