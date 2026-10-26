@@ -366,13 +366,14 @@ def submit(token,payload):
         need(done<3,'LIMIT_REACHED','오늘의 도전 3회를 모두 사용했어요.')
         rows=pool_rows(c,for_submission=True,test=test); analysis=analysis_in(c,rows,test)
         opponent_rows=[r for r in rows if r['participant_id']!=me['id']]
-        need(len(opponent_rows)>=50,'POOL_TOO_SMALL','시드 준비 중이에요. 잠시 후 다시 와 주세요.',503)
+        # Test mode may run with any number of seeds, even none.
+        need(test or len(opponent_rows)>=50,'POOL_TOO_SMALL','시드 준비 중이에요. 잠시 후 다시 와 주세요.',503)
         points=engine.score(strategy,[r['strategy'] for r in opponent_rows]); n=len(opponent_rows)
         bp=threshold(c,day['day_no']); need(bp is not None,'SETUP_REQUIRED','임계값 설정이 필요해요.',503)
         new={'id':uid(),'participant_id':me['id'],'day_no':day['day_no'],'strategy':strategy,'is_seed':0,'is_ranked':1,'nickname':display_name(me),'submitted_at':stamp()}
         reward=None
         if done==0:
-            qualified=points*10000>=bp*2*n
+            qualified=engine.qualified(points,n,bp)
             count=counters(c,test); stock=inventory(c); reserved=pending(c)
             premium_available=count['premium_reserved']<day['premium_cap_cum'] and (test or stock['SESAME']+stock['ACE']>reserved['premium'])
             kind='TOP_CHOICE' if qualified and premium_available else 'BASIC'
@@ -388,7 +389,7 @@ def submit(token,payload):
         analysis=incremental_analysis(rows,analysis,new); allrows=rows+[new]
         ranking=engine.rank_rows(allrows,analysis=analysis)
         myrank=next((r['rank'] for r in ranking if r['participant_id']==me['id']),None)
-        resp={'id':new['id'],'day_no':day['day_no'],'attempt_no':done+1,'attempts_left':2-done,'strategy':strategy,'win_rate':points/(2*n),'points':points,'opponents':n,'threshold_bp_used':bp,'submitted_at':new['submitted_at'],
+        resp={'id':new['id'],'day_no':day['day_no'],'attempt_no':done+1,'attempts_left':2-done,'strategy':strategy,'win_rate':points/(2*n) if n else 0.0,'points':points,'opponents':n,'threshold_bp_used':bp,'submitted_at':new['submitted_at'],
             'rank_estimate':{'rank':myrank,'of':len(ranking),'is_provisional':True},'reward':entitlement_public(reward),
             'nemesis':engine.nemesis(strategy,allrows,participant_id=me['id'],analysis=analysis),'pool_size':len(allrows)}
         c.execute('UPDATE submissions SET response_json=? WHERE id=?',(dumps(resp),new['id']))
@@ -569,7 +570,7 @@ def booth(token,payload):
         need(db.config(c,'purged')!='true' or action=='CLOSE','EVENT_ENDED','파기 후에는 재개장할 수 없어요.')
         if action in ('OPEN','REOPEN'):
             need(not day['frozen_at'],'DAY_FROZEN','확정된 운영일은 재개장할 수 없어요.')
-            need(c.scalar('SELECT COUNT(*) FROM submissions WHERE is_seed=1')>=50,'POOL_TOO_SMALL','부원이 작성한 시드 50개 이상이 필요해요.',503)
+            need(is_test(day) or c.scalar('SELECT COUNT(*) FROM submissions WHERE is_seed=1')>=50,'POOL_TOO_SMALL','부원이 작성한 시드 50개 이상이 필요해요.',503)
             need(day['threshold_applied'],'THRESHOLD_REQUIRED','개장 전에 임계값을 적용해 주세요.')
             stock=inventory(c)
             has_stock=is_test(day) or ((stock['MYCHEW']>0 or stock['SESAME']+stock['ACE']>0) if action=='REOPEN' else (stock['MYCHEW']>0 and stock['SESAME']+stock['ACE']>0))

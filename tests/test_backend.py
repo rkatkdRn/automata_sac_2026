@@ -625,3 +625,20 @@ def test_test_mode_between_real_days_keeps_pools_and_day_order(booth):
     # Visiting test mode is not a way back to an earlier real day.
     error(admin.post("/api/admin/day", json={"day_no": 1}), "INVALID_DAY")
     ok(admin.post("/api/admin/day", json={"day_no": 2}))
+
+
+def test_test_mode_opens_and_scores_without_seeds(booth):
+    admin = booth.admin
+    ok(admin.post("/api/admin/reset", json={"confirm": "RESET", "reason": "시드 없는 테스트"}))
+    # Real days still require 50 seeds.
+    ok(admin.post("/api/admin/threshold", json={"value_bp": 0, "source": "MANUAL", "reason": "테스트"}))
+    error(admin.post("/api/admin/booth", json={"action": "OPEN"}), "POOL_TOO_SMALL")
+    ok(admin.post("/api/admin/day", json={"day_no": TEST_DAY}))
+    booth.open(threshold=0)
+    first = ok(booth.submit(booth.guest("첫시험")))
+    # No opponents yet: defined win rate, and nobody qualifies against an empty pool.
+    assert first["opponents"] == 0 and first["win_rate"] == 0.0 and first["reward"]["kind"] == "BASIC"
+    second = ok(booth.submit(booth.guest("둘째시험"), WIN))
+    assert second["opponents"] == 1 and second["reward"]["kind"] == "TOP_CHOICE"
+    board = ok(admin.get("/api/scoreboard"))
+    assert board["test_mode"] and len(board["rankings"]) == 2
