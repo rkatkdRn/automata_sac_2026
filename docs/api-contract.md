@@ -12,7 +12,7 @@ All errors: `{error:{code,message}}`. Cookie authentication; POST JSON. IDs are 
 - POST `/api/entitlements/{id}/choice` `{choice:"MYCHEW"|"SESAME"|"ACE"}` → full public reward `{entitlement_id,code,kind,premium_exhausted,choices,status:"ISSUED",choice,claimed_at:null}`. One try per person per day (`max_attempts` 1), and that play decides the snack. Every voucher is 1 MYCHEW; a TOP_CHOICE voucher is MYCHEW **plus** one premium item, so its `choices` are `["SESAME","ACE"]` (BASIC: `["MYCHEW"]`). Issuing reserves the MYCHEW (and one generic premium unit for TOP_CHOICE); choice is persisted before claim, repeated same choice is idempotent, and a selected premium item reserves specific stock, preventing overbooking.
 - POST `/api/entitlements/{id}/claim` `{choice:"MYCHEW"|"SESAME"|"ACE"}` → `{status:"CLAIMED",choice,claimed_at,code,entitlement_id}`. Claiming a TOP_CHOICE voucher takes 1 MYCHEW and the chosen premium item from stock.
 - GET `/api/scoreboard` → `{recent:[{nickname,submitted_at}],day_no,booth_state,mychew_left,pool_size,today_count,updated_at,version,test_mode}`. Public board hides every strategy and ranking so players cannot copy winners; `today_count` = distinct people who played on the current day. Staff: GET `/api/admin/scoreboard` → the same plus `rankings:[{rank,participant_id,submission_id,nickname,strategy,points,opponents,win_rate,submitted_at}]` (top 10), `cycle:null|[ranking row x3]` (among top 30, held >=60s) and `recent` with `strategy,win_rate`. SSE `board.updated` carries the public form.
-- GET `/api/hall?scope=DAY1|DAY2|DAY3|OVERALL` → `{scope,frozen:boolean,frozen_at:null|string,rankings:[]}`.
+- GET `/api/hall?scope=DAY1|DAY2|DAY3|OVERALL` → `{scope,frozen:boolean,frozen_at:null|string,mode:"NEAR_CUT"|"TOP",cut_bp,target_bp,rankings:[]}`. Day scopes (`NEAR_CUT`) never show the winners: at freeze they keep the three plays of that day, below the day's snack cutline, whose whole-pool share is closest to cut + 3%p (`target_bp`; e.g. cut 12% → around 15%); each row adds `top_bp`. For a FIXED day the cut is the pool share at or above the fixed win rate. OVERALL (`TOP`) keeps the real top 10.
 - GET `/api/events` → SSE events `state.changed` (state JSON), `board.updated` (scoreboard JSON), `heartbeat`. Finite stream closes/reconnects about 25s. Fallback poll 5s.
 
 ## Admin
@@ -34,7 +34,7 @@ All errors: `{error:{code,message}}`. Cookie authentication; POST JSON. IDs are 
 - POST `/api/admin/inventory/count` `{item:"MYCHEW"|"SESAME"|"ACE",count:integer,reason}` → same inventory response.
 - GET `/api/admin/participants` → `{items:[{id,nickname,kind,name_hidden,submission_count}]}`.
 - POST `/api/admin/participants/{id}/hide` `{reason}` → `{ok:true}`.
-- POST `/api/admin/freeze` `{scope:"DAY1"|"DAY2"|"DAY3"|"OVERALL"}` → hall response. Must close day first; OVERALL requires day3 closed. Repeated calls return existing fixed result.
+- POST `/api/admin/freeze` `{scope:"DAY1"|"DAY2"|"DAY3"|"OVERALL"}` → hall response. Must close day first; OVERALL requires day3 closed. Repeated calls return existing fixed result. Day scopes store the near-cut three (see `/api/hall`).
 - GET `/api/admin/audit` → `{items:[{id,action,reason,details,at}]}` newest first, <=300.
 - GET `/api/admin/export` → ZIP of CSV (no names, student IDs, tokens).
 - GET `/api/admin/backup` → consistent anonymous JSON operational export (restore_supported:false). Full database backups require the supplied local backup script.

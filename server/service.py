@@ -1,6 +1,7 @@
 """Game rules and durable application state (R1–R20)."""
 from __future__ import annotations
 import csv
+from bisect import bisect_right
 import hashlib
 import hmac
 import io
@@ -502,11 +503,12 @@ def board_full():
 def hall_in(c,scope):
     need(scope in ('DAY1','DAY2','DAY3','OVERALL'),'INVALID_SCOPE','순위 범위를 확인해 주세요.',400)
     row=c.one('SELECT * FROM rank_freeze WHERE scope=?',(scope,))
-    if not row: return {'scope':scope,'frozen':False,'frozen_at':None,'rankings':[]}
+    if not row: return {'scope':scope,'frozen':False,'frozen_at':None,'mode':'TOP' if scope=='OVERALL' else 'NEAR_CUT','cut_bp':None,'target_bp':None,'rankings':[]}
     rankings=json.loads(row['rankings_json'])
     people={r['id']:display_name(r) for r in c.all('SELECT p.id,p.nickname,p.name_hidden,p.real_name,p.kind,p.nickname_chosen,i.google_sub AS verified_school_subject FROM participants p LEFT JOIN school_identities i ON i.participant_id=p.id')}
     for rank in rankings: rank['nickname']=people.get(rank['participant_id'],'익명 전술가')
-    return {'scope':scope,'frozen':True,'frozen_at':row['frozen_at'],'rankings':rankings}
+    near=scope!='OVERALL' and bool(rankings) and 'cut_bp' in rankings[0]
+    return {'scope':scope,'frozen':True,'frozen_at':row['frozen_at'],'mode':'NEAR_CUT' if near else 'TOP','cut_bp':rankings[0]['cut_bp'] if near else None,'target_bp':rankings[0]['target_bp'] if near else None,'rankings':rankings}
 
 def hall(scope):
     with db.transaction() as c: return hall_in(c,scope)
@@ -781,11 +783,31 @@ def freeze(token,payload):
         day_no=3 if scope=='OVERALL' else int(scope[-1]);day=c.one('SELECT * FROM day_config WHERE day_no=?',(day_no,))
         need(day['ever_opened'] and day['booth_state'] in ('DONE','CAP_REACHED'),'BOOTH_NOT_CLOSED','해당 운영일을 마감한 뒤 확정해 주세요.')
         if scope=='OVERALL':need(int(db.config(c,'active_day'))==3,'INVALID_DAY','종합 순위는 3일차에 확정해 주세요.')
-        rows=pool_rows(c);ranking=engine.rank_rows(rows,scope_day=None if scope=='OVERALL' else day_no,analysis=analysis_in(c,rows))[:10];when=stamp()
+        rows=pool_rows(c);analysis=analysis_in(c,rows);when=stamp()
+        if scope=='OVERALL':ranking=engine.rank_rows(rows,analysis=analysis)[:10]
+        else:ranking=near_cut(c,rows,analysis,engine.rank_rows(rows,scope_day=day_no,analysis=analysis),day_no)
         c.execute('INSERT INTO rank_freeze(scope,rankings_json,frozen_at) VALUES(?,?,?)',(scope,dumps(ranking),when))
         if scope!='OVERALL':c.execute('UPDATE day_config SET frozen_at=? WHERE day_no=?',(when,day_no))
         audit(c,'RANK_FREEZE',details={'scope':scope});db.bump(c)
         return hall_in(c,scope)
+
+# A day's Hall of Fame never shows the winners: it shows three plays from that day just under the
+# snack cutline (cut + 3%p of the whole pool), a hint that does not hand the next day a winner to copy.
+NEAR_CUT_BP=300
+
+def near_cut(c, rows, analysis, ranked, day_no):
+    rule=pass_rule(c,day_no)
+    if not rule or not ranked: return []
+    mode,value=rule
+    rates=sorted(engine.rate_fraction(analysis[r['id']]) for r in rows)
+    def share(rate):  # rounded-up top share, ties in the player's favour (same as top_share_bp)
+        return -(-(1+len(rates)-bisect_right(rates,rate))*10000//len(rates))
+    if mode=='LIVE': cut=value
+    else: cut=-(-sum(1 for r in rows if engine.qualified(analysis[r['id']]['points'],analysis[r['id']]['opponents'],value))*10000//len(rows))
+    target=cut+NEAR_CUT_BP
+    for r in ranked: r.update(top_bp=share(engine.rate_fraction(analysis[r['submission_id']])),cut_bp=cut,target_bp=target)
+    picked=sorted((r for r in ranked if r['top_bp']>cut),key=lambda r:(abs(r['top_bp']-target),r['rank']))[:3]
+    return sorted(picked,key=lambda r:r['rank'])
 
 def audits(token):
     with db.transaction() as c:
