@@ -672,6 +672,78 @@ def void_entitlement(token,entitlement_id,payload):
         c.execute("UPDATE entitlements SET status='VOID' WHERE id=?",(e['id'],));audit(c,'ENTITLEMENT_VOID',reason,{'id':e['id'],'return_stock':return_stock});db.bump(c)
         return {'ok':True}
 
+# Admin submission log: every play with its person, try number and snack, editable at any time.
+# Admin edits skip cap/stock checks; real-day ledger rows keep physical stock truthful.
+def submission_log(token,day=None):
+    with db.transaction() as c:
+        require_admin(c,token)
+        day_no=get_day(c)['day_no'] if day in (None,'') else None if day=='ALL' else int(day) if str(day).isdigit() else -1
+        need(day_no is None or day_no in REAL_DAYS+(TEST_DAY,),'INVALID_DAY','운영일을 확인해 주세요.',400)
+        where='s.is_seed=0'+('' if day_no is None else ' AND s.day_no=?')
+        rows=c.all(f'SELECT s.id,s.day_no,s.attempt_no,s.participant_id,s.l1,s.l2,s.l3,s.l4,s.l5,s.points,s.opponents,s.submitted_at,p.kind,p.nickname,p.name_hidden,p.real_name,i.google_sub AS verified_school_subject,e.id AS e_id,e.code,e.kind AS e_kind,e.choice,e.status,e.issued_at,e.claimed_at,e.premium_exhausted FROM submissions s JOIN participants p ON p.id=s.participant_id LEFT JOIN school_identities i ON i.participant_id=p.id LEFT JOIN entitlements e ON e.submission_id=s.id WHERE {where} ORDER BY s.submitted_at DESC,s.attempt_no DESC,s.id',() if day_no is None else (day_no,))
+        items=[]
+        for r in rows:
+            items.append({'id':r['id'],'day_no':r['day_no'],'attempt_no':r['attempt_no'],'participant_id':r['participant_id'],'nickname':display_name(r),'kind':r['kind'],
+                'strategy':[r['l1'],r['l2'],r['l3'],r['l4'],r['l5']],'points':r['points'],'opponents':r['opponents'],'win_rate':r['points']/(2*r['opponents']) if r['opponents'] else 0.0,'submitted_at':r['submitted_at'],
+                'entitlement':None if r['e_id'] is None else {'id':r['e_id'],'code':r['code'],'kind':r['e_kind'],'choice':r['choice'],'status':r['status'],'issued_at':r['issued_at'],'claimed_at':r['claimed_at'],'premium_exhausted':bool(r['premium_exhausted'])}})
+        return {'day_no':day_no,'items':items}
+
+def admin_submission(c,submission_id):
+    sub=c.one('SELECT * FROM submissions WHERE id=? AND is_seed=0',(submission_id,))
+    need(sub is not None,'NOT_FOUND','제출 기록을 찾을 수 없어요.',404)
+    return sub,c.one('SELECT * FROM entitlements WHERE submission_id=?',(submission_id,))
+
+def adjust_snack(token,submission_id,payload):
+    reason=reason_text(payload);kind=payload.get('kind') or None;choice=payload.get('choice') or None;status=payload.get('status','ISSUED');return_stock=payload.get('return_stock',False)
+    need(kind in (None,'BASIC','TOP_CHOICE') and status in ('ISSUED','CLAIMED','VOID') and type(return_stock) is bool,'INVALID_INPUT','간식 수정 값을 확인해 주세요.',400)
+    need(choice is None or choice in ITEMS,'INVALID_CHOICE','간식을 골라 주세요.',400)
+    need(kind!='BASIC' or choice in (None,'MYCHEW'),'INVALID_CHOICE','마이쮸 수령권에는 마이쮸만 고를 수 있어요. 고급 선택권으로 바꿔 주세요.',400)
+    if kind=='BASIC': choice='MYCHEW'
+    need(kind is None or status!='CLAIMED' or choice is not None,'INVALID_CHOICE','수령 완료로 바꾸려면 받은 간식을 골라 주세요.',400)
+    with db.transaction(write=True) as c:
+        require_admin(c,token);sub,e=admin_submission(c,submission_id);at=stamp();ent_id=e['id'] if e else uid()
+        given_before=e['choice'] if e and e['status']=='CLAIMED' else None
+        given_after=choice if kind and status=='CLAIMED' else None
+        if sub['day_no']!=TEST_DAY and given_before!=given_after:
+            # A corrected item (claimed -> claimed) was never handed out, so it returns automatically.
+            if given_before and (given_after or return_stock):
+                c.execute('INSERT INTO inventory_ledger(id,item,delta,reason,entitlement_id,at) VALUES(?,?,1,?,?,?)',(uid(),given_before,'ADMIN_ADJUST',ent_id,at))
+            if given_after:
+                c.execute('INSERT INTO inventory_ledger(id,item,delta,reason,entitlement_id,at) VALUES(?,?,-1,?,?,?)',(uid(),given_after,'ADMIN_ADJUST',ent_id,at))
+        claimed_at=(e['claimed_at'] if e and e['status']=='CLAIMED' else at) if kind and status=='CLAIMED' else None
+        if kind is None:
+            if e: c.execute('DELETE FROM entitlements WHERE id=?',(e['id'],))
+        elif e:
+            c.execute('UPDATE entitlements SET kind=?,choice=?,status=?,claimed_at=? WHERE id=?',(kind,choice,status,claimed_at,e['id']))
+        else:
+            code=''.join(secrets.choice('23456789ABCDEFGHJKLMNPQRSTUVWXYZ') for _ in range(6))
+            while c.one('SELECT id FROM entitlements WHERE code=?',(code,)):
+                code=''.join(secrets.choice('23456789ABCDEFGHJKLMNPQRSTUVWXYZ') for _ in range(6))
+            c.execute('INSERT INTO entitlements(id,submission_id,code,kind,choice,status,issued_at,claimed_at) VALUES(?,?,?,?,?,?,?,?)',(ent_id,submission_id,code,kind,choice,status,at,claimed_at))
+        audit(c,'SNACK_ADJUSTED',reason,{'submission_id':submission_id,'before':None if not e else {k:e[k] for k in ('kind','choice','status')},'after':None if not kind else {'kind':kind,'choice':choice,'status':status},'return_stock':return_stock})
+        clear_caches(c);db.bump(c)
+        return {'ok':True}
+
+def delete_submission(token,submission_id,payload):
+    reason=reason_text(payload);return_stock=payload.get('return_stock',False)
+    need(type(return_stock) is bool,'INVALID_INPUT','실물 반환 여부를 확인해 주세요.',400)
+    with db.transaction(write=True) as c:
+        require_admin(c,token);sub,e=admin_submission(c,submission_id)
+        if e and e['status']=='CLAIMED' and return_stock and sub['day_no']!=TEST_DAY:
+            c.execute('INSERT INTO inventory_ledger(id,item,delta,reason,entitlement_id,at) VALUES(?,?,1,?,?,?)',(uid(),e['choice'],'ADMIN_ADJUST',e['id'],stamp()))
+        if e: c.execute('DELETE FROM entitlements WHERE id=?',(e['id'],))
+        c.execute('DELETE FROM submissions WHERE id=?',(submission_id,))
+        # The try is given back; remaining tries are renumbered 1..n (ascending, so the unique key never collides).
+        for number,row in enumerate(c.all('SELECT id,attempt_no,response_json FROM submissions WHERE participant_id=? AND day_no=? ORDER BY submitted_at,attempt_no,id',(sub['participant_id'],sub['day_no'])),1):
+            if row['attempt_no']!=number:
+                saved=json.loads(row['response_json']) if row['response_json'] else None
+                if saved: saved['attempt_no']=number
+                c.execute('UPDATE submissions SET attempt_no=?,response_json=? WHERE id=?',(number,dumps(saved) if saved else row['response_json'],row['id']))
+        audit(c,'SUBMISSION_DELETED',reason,{'submission_id':submission_id,'participant_id':sub['participant_id'],'day_no':sub['day_no'],'attempt_no':sub['attempt_no'],
+            'strategy':[sub['l1'],sub['l2'],sub['l3'],sub['l4'],sub['l5']],'entitlement':None if not e else {k:e[k] for k in ('code','kind','choice','status')},'return_stock':return_stock})
+        clear_caches(c,tests=(sub['day_no']==TEST_DAY,),scores=True);db.bump(c)
+        return {'ok':True}
+
 def participants(token):
     with db.transaction() as c:
         require_admin(c,token)

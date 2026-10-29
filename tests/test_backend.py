@@ -642,3 +642,68 @@ def test_test_mode_opens_and_scores_without_seeds(booth):
     assert second["opponents"] == 1 and second["reward"]["kind"] == "TOP_CHOICE"
     board = ok(admin.get("/api/scoreboard"))
     assert board["test_mode"] and len(board["rankings"]) == 2
+
+
+def test_admin_submission_log_delete_returns_try_and_renumbers(booth):
+    admin = booth.admin
+    booth.open()
+    guest = booth.guest("기록손님")
+    first = ok(booth.submit(guest, WIN))
+    ok(booth.submit(guest, TIE))
+    ok(booth.submit(guest, LOSE))
+    log = ok(admin.get("/api/admin/submissions"))
+    assert log["day_no"] == 1 and [r["attempt_no"] for r in log["items"]] == [3, 2, 1]
+    oldest = log["items"][-1]
+    assert oldest["nickname"] == "기록손님" and oldest["kind"] == "GUEST" and oldest["strategy"] == WIN
+    assert oldest["entitlement"]["code"] == first["reward"]["code"] and oldest["entitlement"]["status"] == "ISSUED"
+    assert all(r["entitlement"] is None for r in log["items"][:2])
+    error(admin.post(f"/api/admin/submissions/{oldest['id']}/delete", json={}), "REASON_REQUIRED")
+    ok(admin.post(f"/api/admin/submissions/{oldest['id']}/delete", json={"reason": "잘못 입력"}))
+    left = ok(admin.get("/api/admin/submissions?day=1"))["items"]
+    assert [(r["attempt_no"], r["strategy"]) for r in left] == [(2, LOSE), (1, TIE)]
+    assert ok(guest.get("/api/state"))["attempts_left"] == 1
+    assert ok(admin.get("/api/admin/dashboard"))["counters"]["mychew_used"] == 0
+    again = ok(booth.submit(guest, WIN))
+    assert again["attempt_no"] == 3 and again["reward"] is None
+    assert sorted(r["attempt_no"] for r in ok(guest.get("/api/me/submissions"))["items"]) == [1, 2, 3]
+    assert len(ok(admin.get("/api/admin/submissions?day=ALL"))["items"]) == 3
+    assert ok(admin.get("/api/admin/submissions?day=2"))["items"] == []
+    error(admin.get("/api/admin/submissions?day=5"), "INVALID_DAY")
+    actions = [r["action"] for r in ok(admin.get("/api/admin/audit"))["items"]]
+    assert "SUBMISSION_DELETED" in actions
+
+
+def test_admin_snack_adjustments_keep_stock_ledger_true(booth):
+    admin = booth.admin
+    booth.open(0)
+    guest = booth.guest("간식손님")
+    first = ok(booth.submit(guest, WIN))
+    second = ok(booth.submit(guest, TIE))
+    stock = lambda: ok(admin.get("/api/admin/inventory"))["inventory"]
+    start = stock()
+    snack = lambda sid, **body: admin.post(f"/api/admin/submissions/{sid}/snack", json={"reason": "현장 정정", **body})
+    entry = lambda sid: next(r for r in ok(admin.get("/api/admin/submissions"))["items"] if r["id"] == sid)["entitlement"]
+
+    ok(snack(first["id"], kind="TOP_CHOICE", choice="SESAME", status="CLAIMED"))
+    assert stock()["SESAME"] == start["SESAME"] - 1 and entry(first["id"])["claimed_at"]
+    # Correcting the item handed out moves the stock between items.
+    ok(snack(first["id"], kind="TOP_CHOICE", choice="ACE", status="CLAIMED"))
+    assert stock() == {**start, "ACE": start["ACE"] - 1}
+    # Back to unclaimed: the item stays out unless it was physically returned.
+    ok(snack(first["id"], kind="TOP_CHOICE", choice="ACE", status="ISSUED"))
+    assert stock()["ACE"] == start["ACE"] - 1 and entry(first["id"])["claimed_at"] is None
+    ok(snack(first["id"], kind="TOP_CHOICE", choice="ACE", status="CLAIMED"))
+    ok(snack(first["id"], kind=None, return_stock=True))
+    assert stock()["ACE"] == start["ACE"] - 1 and entry(first["id"]) is None
+    error(snack(first["id"], kind="TOP_CHOICE", status="CLAIMED"), "INVALID_CHOICE")
+    error(snack(first["id"], kind="BASIC", choice="ACE", status="ISSUED"), "INVALID_CHOICE")
+    # A voucher can be issued on any play, here the second try.
+    ok(snack(second["id"], kind="BASIC", status="ISSUED"))
+    created = entry(second["id"])
+    assert created["kind"] == "BASIC" and created["status"] == "ISSUED" and len(created["code"]) == 6
+    assert ok(admin.get("/api/admin/dashboard"))["counters"] == {"mychew_used": 1, "premium_reserved": 0}
+    ok(guest.post(f"/api/entitlements/{created['id']}/claim", json={"choice": "MYCHEW"}))
+    ok(admin.post(f"/api/admin/submissions/{second['id']}/delete", json={"reason": "중복", "return_stock": True}))
+    assert stock()["MYCHEW"] == start["MYCHEW"]
+    assert ok(admin.get("/api/admin/dashboard"))["counters"]["mychew_used"] == 0
+    assert any(r["reason"] == "ADMIN_ADJUST" for r in ok(admin.get("/api/admin/inventory"))["ledger"])
