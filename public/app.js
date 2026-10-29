@@ -263,7 +263,7 @@ async function boot(){
   $('#privacy-link').onclick=privacyDialog;setInterval(tickClocks,1000);
   try{
     const route=location.pathname;
-    if(route.startsWith('/admin')){currentView='admin';const module=await import('/admin.js?v=student-id-20261029-r9');await module.mountAdmin(app);return;}
+    if(route.startsWith('/admin')){currentView='admin';const module=await import('/admin.js?v=admin-hover-20261029-r10');await module.mountAdmin(app);return;}
     if(route==='/board'){renderBoard(await api('/api/scoreboard'));startLive();try{await navigator.wakeLock?.request('screen');}catch{}return;}
     state=await api('/api/state');
     if(route==='/hall'){hallScope=state.test_mode?'DAY1':`DAY${state.day_no||1}`;await loadHall();startLive();return;}

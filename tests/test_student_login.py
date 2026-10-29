@@ -327,3 +327,24 @@ def test_cleanup_removes_identities_challenges_and_player_sessions(booth, operat
         assert c.scalar("SELECT COUNT(*) FROM google_login_challenges") == 0
         assert c.scalar("SELECT COUNT(*) FROM sessions WHERE role!='ADMIN'") == 0
     assert ok(student.get("/api/state"))["participant_id"] is None
+
+
+def test_admin_submission_log_carries_student_id_and_name_for_hover(booth):
+    from test_backend import PIN
+    booth.open()
+    student = booth.client()
+    ok(join_student(student, student_id="26001", name="홍길동", nickname="번개전술"))
+    ok(booth.submit(student))
+    ok(booth.submit(booth.guest("손님별명")))
+    rows = {r["nickname"]: r for r in ok(booth.admin.get("/api/admin/submissions"))["items"]}
+    assert (rows["번개전술"]["student_id"], rows["번개전술"]["real_name"]) == ("26-001", "홍길동")
+    assert (rows["손님별명"]["student_id"], rows["손님별명"]["real_name"]) == (None, None)
+    # admin-only: players get 401, and public pages still carry nicknames only
+    error(student.get("/api/admin/submissions"), "UNAUTHORIZED")
+    public = json.dumps([ok(student.get("/api/scoreboard")), ok(student.get("/api/me/submissions"))], ensure_ascii=False)
+    assert "홍길동" not in public and "26-001" not in public
+    ok(booth.admin.post("/api/admin/booth", json={"action": "CLOSE"}))
+    ok(booth.admin.post("/api/admin/purge", json={"confirm": "PURGE", "reason": "테스트 행사 종료"}))
+    ok(booth.admin.post("/api/admin/login", json={"pin": PIN}))
+    after = json.dumps(ok(booth.admin.get("/api/admin/submissions?day=ALL")), ensure_ascii=False)
+    assert "홍길동" not in after and "26-001" not in after

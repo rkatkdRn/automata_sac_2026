@@ -673,10 +673,13 @@ def submission_log(token,day=None):
         day_no=get_day(c)['day_no'] if day in (None,'') else None if day=='ALL' else int(day) if str(day).isdigit() else -1
         need(day_no is None or day_no in REAL_DAYS+(TEST_DAY,),'INVALID_DAY','운영일을 확인해 주세요.',400)
         where='s.is_seed=0'+('' if day_no is None else ' AND s.day_no=?')
-        rows=c.all(f'SELECT s.id,s.day_no,s.attempt_no,s.participant_id,s.l1,s.l2,s.l3,s.l4,s.l5,s.points,s.opponents,s.top_bp,s.submitted_at,p.kind,p.nickname,p.name_hidden,p.real_name,p.nickname_chosen,i.google_sub AS verified_school_subject,e.id AS e_id,e.code,e.kind AS e_kind,e.choice,e.status,e.issued_at,e.claimed_at,e.premium_exhausted FROM submissions s JOIN participants p ON p.id=s.participant_id LEFT JOIN school_identities i ON i.participant_id=p.id LEFT JOIN entitlements e ON e.submission_id=s.id WHERE {where} ORDER BY s.submitted_at DESC,s.attempt_no DESC,s.id',() if day_no is None else (day_no,))
+        rows=c.all(f'SELECT s.id,s.day_no,s.attempt_no,s.participant_id,s.l1,s.l2,s.l3,s.l4,s.l5,s.points,s.opponents,s.top_bp,s.submitted_at,p.kind,p.nickname,p.name_hidden,p.real_name,p.student_id,p.nickname_chosen,i.google_sub AS verified_school_subject,e.id AS e_id,e.code,e.kind AS e_kind,e.choice,e.status,e.issued_at,e.claimed_at,e.premium_exhausted FROM submissions s JOIN participants p ON p.id=s.participant_id LEFT JOIN school_identities i ON i.participant_id=p.id LEFT JOIN entitlements e ON e.submission_id=s.id WHERE {where} ORDER BY s.submitted_at DESC,s.attempt_no DESC,s.id',() if day_no is None else (day_no,))
         items=[]
         for r in rows:
+            # 학번 and 이름 are admin-only: tab 08 shows them when hovering a student's name
+            student=r['kind']=='STUDENT'
             items.append({'id':r['id'],'day_no':r['day_no'],'attempt_no':r['attempt_no'],'participant_id':r['participant_id'],'nickname':display_name(r),'kind':r['kind'],
+                'student_id':r['student_id'] if student else None,'real_name':r['real_name'] if student else None,
                 'strategy':[r['l1'],r['l2'],r['l3'],r['l4'],r['l5']],'points':r['points'],'opponents':r['opponents'],'win_rate':r['points']/(2*r['opponents']) if r['opponents'] else 0.0,'top_bp':r['top_bp'],'submitted_at':r['submitted_at'],
                 'entitlement':None if r['e_id'] is None else {'id':r['e_id'],'code':r['code'],'kind':r['e_kind'],'choice':r['choice'],'status':r['status'],'issued_at':r['issued_at'],'claimed_at':r['claimed_at'],'premium_exhausted':bool(r['premium_exhausted'])}})
         return {'day_no':day_no,'items':items}
