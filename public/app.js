@@ -61,7 +61,7 @@ function flags(){return `<div class="field-flags" aria-hidden="true">${['I','II'
 function gameFrame(content){return `<div class="game-layout"><aside class="desk-aside"><div class="eyebrow">FIELD MANUAL / 101 : 5</div><h1>같은 병력.<br>다른 전략.<br>예측할 수 없는 승부.</h1><p>강한 전선 하나보다<br>더 많은 전선의 작은 승리가 중요합니다.</p>${flags()}<div class="rule-divider"></div><p>101명을 다섯 전선에 배치하세요.<br>지금까지 모인 모든 전략이 상대가 됩니다.</p></aside><section class="game-card ${currentView==='result'||currentView==='closed'?'watermarked':''}">${content}</section></div>`;}
 // The test operating day has no hall of fame and is labelled instead of numbered.
 const dayLabel=d=>d.test_mode?'🧪 테스트 모드':`${d.day_no||1}일차`;
-function topLine(){return `<div class="topline"><span>${dayLabel(state)} · ${escapeHTML(state.nickname||'지휘관')}</span><button class="text-btn" id="logout">다른 사람으로 시작</button></div>`;}
+function topLine(){return `<div class="topline"><span>${dayLabel(state)} · <b class="topline-name">${escapeHTML(state.nickname||'지휘관')}</b></span><button class="text-btn" id="logout">다른 사람으로 시작</button></div>`;}
 function bindLogout(){const el=$('#logout');if(el)el.onclick=async()=>{if(!await confirmDialog('다른 사람으로 시작할까요?',state.kind==='GUEST'?'외부인 임시 로그인은 로그아웃 후 닉네임만으로 복구할 수 없어요. 계속할까요?':'같은 학교 Google 계정으로 다시 로그인하면 기존 기록과 남은 횟수가 이어집니다. 공용 기기에서는 Google 계정에서도 별도로 로그아웃해 주세요.','로그아웃'))return;try{await api('/api/session/logout',{method:'POST',body:{}});window.google?.accounts?.id?.disableAutoSelect();storage.remove('draft');storage.remove('pending');currentResult=null;historyItems=[];state={...state,participant_id:null,nickname:null};goto('/');renderLogin();}catch(e){showToast(e.message,true);}};}
 async function privacyDialog(){
   try { state = await api('/api/state'); } catch {}
@@ -164,7 +164,7 @@ function renderPlay(){
   };
 }
 function renderResult(){
-  if(!currentResult)return renderInitialParticipant();currentHoldCancel?.();currentView='result';goto('/result');const r=currentResult;const rank=r.rank_estimate;const reward=r.reward;const winRate=(Number(r.win_rate)*100).toFixed(1);const top=rank?.rank&&rank.of?Math.max(1,Math.round(rank.rank/rank.of*100)):null;
+  if(!currentResult)return renderInitialParticipant();currentHoldCancel?.();currentView='result';goto('/result');const r=currentResult;const rank=r.rank_estimate;const reward=r.reward;const winRate=(Number(r.win_rate)*100).toFixed(1);const top=r.top_bp!=null?Math.max(1,Math.ceil(r.top_bp/100)):rank?.rank&&rank.of?Math.max(1,Math.round(rank.rank/rank.of*100)):null;
   app.innerHTML=gameFrame(`${topLine()}<div class="result-summary"><div class="eyebrow">AFTER ACTION REPORT / ${r.attempt_no}차 작전</div>${top?`<div class="result-rate"><span class="prefix">상위</span>${top}<span>%</span></div>`:''}<div class="result-rate"><span class="prefix">승률</span>${winRate}<span>%</span></div><p class="result-rank">${rank?.rank?`임시 순위 <b>${rank.rank}위</b> / ${rank.of}명`:'순위를 계산하고 있어요'} · 상대 ${Number(r.opponents)}개 전략</p><p class="hint">제출 순간의 승률 · 순위는 이후 달라질 수 있어요.</p></div>${reward?rewardMarkup(reward):'<div class="notice">이번 제출은 순위만 반영돼요.<br>오늘의 간식은 첫 제출 결과에서 확인해 주세요.</div>'}<div class="nemesis"><h3>${r.nemesis?'이 전략이 당신의 천적':'천적 없음!'}</h3>${r.nemesis?`${allocation(r.nemesis.strategy)}<p>전선 ${r.nemesis.lost_lanes.length}개를 내주고 있어요 (${r.nemesis.lost_lanes.join('·')}번).</p>`:'<p>제출할 때 나를 이긴 상대가 없었어요.</p>'}</div><button class="btn full" id="retry-play" ${state.attempts_left<=0?'disabled':''}>${state.attempts_left>0?`다시 도전 · 오늘 ${state.attempts_left}회 남음`:'오늘의 도전을 모두 사용했어요'}</button><div class="below-action"><button type="button" class="text-btn" id="my-history">내 작전 기록</button><a href="/hall">명예의 전당</a></div>`);
   bindLogout();$('#my-history').onclick=renderHistory;$('#retry-play').onclick=()=>{if(state.open_now)renderPlay();else renderClosed();};if(reward)bindReward(reward);tickClocks();
 }
@@ -297,7 +297,7 @@ async function boot(){
   $('#privacy-link').onclick=privacyDialog;setInterval(tickClocks,1000);
   try{
     const route=location.pathname;
-    if(route.startsWith('/admin')){currentView='admin';const module=await import('/admin.js?v=test-mode-20261029-r5');await module.mountAdmin(app);return;}
+    if(route.startsWith('/admin')){currentView='admin';const module=await import('/admin.js?v=test-mode-20261029-r7');await module.mountAdmin(app);return;}
     if(route==='/board'){renderBoard(await api('/api/scoreboard'));startLive();try{await navigator.wakeLock?.request('screen');}catch{}return;}
     state=await api('/api/state');
     if(route==='/hall'){hallScope=state.test_mode?'DAY1':`DAY${state.day_no||1}`;await loadHall();startLive();return;}

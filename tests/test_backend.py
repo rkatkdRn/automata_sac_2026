@@ -123,8 +123,8 @@ def booth(tmp_path, monkeypatch):
                 "mychew_cap_cum": mychew, "premium_cap_cum": premium, "close_rule": rule, "reason": "테스트 설정",
             }))
 
-        def open(self, threshold=7200):
-            ok(admin.post("/api/admin/threshold", json={"value_bp": threshold, "source": "MANUAL", "reason": "테스트 임계값"}))
+        def open(self, threshold=7200, mode="FIXED"):
+            ok(admin.post("/api/admin/threshold", json={"mode": mode, "value_bp": threshold, "source": "MANUAL", "reason": "테스트 임계값"}))
             return ok(admin.post("/api/admin/booth", json={"action": "OPEN"}))
 
         def submit(self, client, strategy=TIE, request_id=None):
@@ -656,6 +656,7 @@ def test_admin_submission_log_delete_returns_try_and_renumbers(booth):
     oldest = log["items"][-1]
     assert oldest["nickname"] == "기록손님" and oldest["kind"] == "GUEST" and oldest["strategy"] == WIN
     assert oldest["entitlement"]["code"] == first["reward"]["code"] and oldest["entitlement"]["status"] == "ISSUED"
+    assert oldest["top_bp"] == first["top_bp"]
     assert all(r["entitlement"] is None for r in log["items"][:2])
     error(admin.post(f"/api/admin/submissions/{oldest['id']}/delete", json={}), "REASON_REQUIRED")
     ok(admin.post(f"/api/admin/submissions/{oldest['id']}/delete", json={"reason": "잘못 입력"}))
@@ -707,3 +708,44 @@ def test_admin_snack_adjustments_keep_stock_ledger_true(booth):
     assert stock()["MYCHEW"] == start["MYCHEW"]
     assert ok(admin.get("/api/admin/dashboard"))["counters"]["mychew_used"] == 0
     assert any(r["reason"] == "ADMIN_ADJUST" for r in ok(admin.get("/api/admin/inventory"))["ledger"])
+
+
+def test_live_top_share_rule_is_default_and_judges_against_whole_pool(booth):
+    admin = booth.admin
+    # No mode given: the live top-share rule applies (15% here).
+    assert ok(admin.post("/api/admin/threshold", json={"value_bp": 1500, "reason": "실시간 상위 15%"}))["mode"] == "LIVE"
+    ok(admin.post("/api/admin/booth", json={"action": "OPEN"}))
+    assert ok(admin.get("/api/admin/dashboard"))["pass_mode"] == "LIVE"
+    # Against 50 TIE seeds, WIN beats them all (1st of 51 -> top 1.97%), LOSE loses to all.
+    winner = ok(booth.submit(booth.guest("상위손님"), WIN))
+    assert winner["pass_mode"] == "LIVE" and winner["top_bp"] == 197
+    assert winner["reward"]["kind"] == "TOP_CHOICE"
+    loser = ok(booth.submit(booth.guest("하위손님"), LOSE))
+    assert loser["top_bp"] == 10000 and loser["reward"]["kind"] == "BASIC"
+
+
+def test_live_rule_boundary_and_mode_validation(booth):
+    admin = booth.admin
+    error(admin.post("/api/admin/threshold", json={"mode": "PERCENT", "value_bp": 1500, "reason": "잘못된 방식"}), "INVALID_INPUT")
+    # 1st of 51 is 197/10000 (rounded up); a 1.96% cutoff misses it, 1.97% would pass.
+    ok(admin.post("/api/admin/threshold", json={"mode": "LIVE", "value_bp": 196, "reason": "경계"}))
+    ok(admin.post("/api/admin/booth", json={"action": "OPEN"}))
+    first = ok(booth.submit(booth.guest("경계손님"), WIN))
+    assert first["top_bp"] == 197 and first["reward"]["kind"] == "BASIC"
+
+
+def test_threshold_mode_column_is_added_to_existing_database(tmp_path, monkeypatch):
+    path = tmp_path / "old.db"
+    with sqlite3.connect(path) as old:
+        old.execute("CREATE TABLE threshold_history (id TEXT PRIMARY KEY, day_no INTEGER NOT NULL, value_bp INTEGER NOT NULL, source TEXT NOT NULL, reason TEXT NOT NULL, set_by TEXT NOT NULL, set_at TEXT NOT NULL)")
+        old.execute("INSERT INTO threshold_history VALUES('t1',1,7200,'MANUAL','이전 값','ADMIN','2026-10-29T09:00:00+09:00')")
+        old.execute("CREATE TABLE submissions (id TEXT PRIMARY KEY, participant_id TEXT, day_no INTEGER NOT NULL)")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("VERCEL", raising=False)
+    monkeypatch.setenv("DB_PATH", str(path))
+    from server import db
+    db.initialize(force=True)
+    db.initialize(force=True)  # idempotent
+    with sqlite3.connect(path) as new:
+        assert new.execute("SELECT mode,value_bp FROM threshold_history").fetchall() == [("FIXED", 7200)]
+        assert "top_bp" in [row[1] for row in new.execute("PRAGMA table_info(submissions)")]

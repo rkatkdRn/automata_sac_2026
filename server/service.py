@@ -103,8 +103,20 @@ def display_name(row):
     return row['nickname']
 
 def threshold(c, day_no):
-    row=c.one('SELECT value_bp FROM threshold_history WHERE day_no=? ORDER BY set_at DESC LIMIT 1',(day_no,))
-    return row['value_bp'] if row else None
+    rule=pass_rule(c,day_no)
+    return rule[1] if rule else None
+
+# Snack pass rule per day. FIXED: win rate >= value_bp. LIVE: at submission, the play is in the
+# top value_bp/10000 of the whole pool (seeds included), so the pass rate holds even as the crowd shifts.
+def pass_rule(c, day_no):
+    row=c.one('SELECT mode,value_bp FROM threshold_history WHERE day_no=? ORDER BY set_at DESC LIMIT 1',(day_no,))
+    return (row['mode'],row['value_bp']) if row else None
+
+def top_share_bp(rows, analysis, row_id):
+    """Position in the pool as a rounded-up share in 1/10000 (1 = best); ties count in the player's favour."""
+    mine=engine.rate_fraction(analysis[row_id])
+    better=sum(1 for r in rows if engine.rate_fraction(analysis[r['id']])>mine)
+    return -(-(better+1)*10000//len(rows))
 
 def inventory(c):
     result={x:0 for x in ITEMS}
@@ -142,7 +154,7 @@ def state_in(c, token=None):
         'participant_id':person['id'] if person else None,'nickname':display_name(person) if person else None,
         'kind':person['kind'] if person else None,'auth_method':('GOOGLE' if person['kind']=='STUDENT' else 'GUEST') if person else None,
         'server_time':stamp(),'privacy_contact':os.getenv('PRIVACY_CONTACT','Automata 부스 운영진'),
-        'cloud_mode':bool(os.getenv('DATABASE_URL')),'purged':purged,'threshold_bp':threshold(c,day['day_no'])}
+        'cloud_mode':bool(os.getenv('DATABASE_URL')),'purged':purged,'threshold_bp':threshold(c,day['day_no']),'pass_mode':(pass_rule(c,day['day_no']) or (None,))[0]}
 
 def state(token=None):
     with db.transaction() as c: return state_in(c,token)
@@ -369,11 +381,13 @@ def submit(token,payload):
         # Test mode may run with any number of seeds, even none.
         need(test or len(opponent_rows)>=50,'POOL_TOO_SMALL','시드 준비 중이에요. 잠시 후 다시 와 주세요.',503)
         points=engine.score(strategy,[r['strategy'] for r in opponent_rows]); n=len(opponent_rows)
-        bp=threshold(c,day['day_no']); need(bp is not None,'SETUP_REQUIRED','임계값 설정이 필요해요.',503)
+        rule=pass_rule(c,day['day_no']); need(rule is not None,'SETUP_REQUIRED','임계값 설정이 필요해요.',503); mode,bp=rule
         new={'id':uid(),'participant_id':me['id'],'day_no':day['day_no'],'strategy':strategy,'is_seed':0,'is_ranked':1,'nickname':display_name(me),'submitted_at':stamp()}
+        analysis=incremental_analysis(rows,analysis,new); allrows=rows+[new]
+        top_bp=top_share_bp(allrows,analysis,new['id'])
         reward=None
         if done==0:
-            qualified=engine.qualified(points,n,bp)
+            qualified=engine.qualified(points,n,bp) if mode=='FIXED' else n>0 and top_bp<=bp
             count=counters(c,test); stock=inventory(c); reserved=pending(c)
             premium_available=count['premium_reserved']<day['premium_cap_cum'] and (test or stock['SESAME']+stock['ACE']>reserved['premium'])
             kind='TOP_CHOICE' if qualified and premium_available else 'BASIC'
@@ -382,14 +396,13 @@ def submit(token,payload):
             reward={'id':uid(),'code':''.join(secrets.choice('23456789ABCDEFGHJKLMNPQRSTUVWXYZ') for _ in range(6)),'kind':kind,'premium_exhausted':int(qualified and not premium_available),'choice':None,'status':'ISSUED','claimed_at':None}
             while c.one('SELECT id FROM entitlements WHERE code=?',(reward['code'],)):
                 reward['code']=''.join(secrets.choice('23456789ABCDEFGHJKLMNPQRSTUVWXYZ') for _ in range(6))
-        c.execute('INSERT INTO submissions(id,request_id,participant_id,day_no,attempt_no,l1,l2,l3,l4,l5,is_seed,is_ranked,points,opponents,threshold_bp_used,submitted_at) VALUES(?,?,?,?,?,?,?,?,?,?,0,1,?,?,?,?)',
-            (new['id'],request_id,me['id'],day['day_no'],done+1,*strategy,points,n,bp,new['submitted_at']))
+        c.execute('INSERT INTO submissions(id,request_id,participant_id,day_no,attempt_no,l1,l2,l3,l4,l5,is_seed,is_ranked,points,opponents,threshold_bp_used,top_bp,submitted_at) VALUES(?,?,?,?,?,?,?,?,?,?,0,1,?,?,?,?,?)',
+            (new['id'],request_id,me['id'],day['day_no'],done+1,*strategy,points,n,bp,top_bp,new['submitted_at']))
         if reward:
             c.execute('INSERT INTO entitlements(id,submission_id,code,kind,premium_exhausted,issued_at) VALUES(?,?,?,?,?,?)',(reward['id'],new['id'],reward['code'],reward['kind'],reward['premium_exhausted'],stamp()))
-        analysis=incremental_analysis(rows,analysis,new); allrows=rows+[new]
         ranking=engine.rank_rows(allrows,analysis=analysis)
         myrank=next((r['rank'] for r in ranking if r['participant_id']==me['id']),None)
-        resp={'id':new['id'],'day_no':day['day_no'],'attempt_no':done+1,'attempts_left':2-done,'strategy':strategy,'win_rate':points/(2*n) if n else 0.0,'points':points,'opponents':n,'threshold_bp_used':bp,'submitted_at':new['submitted_at'],
+        resp={'id':new['id'],'day_no':day['day_no'],'attempt_no':done+1,'attempts_left':2-done,'strategy':strategy,'win_rate':points/(2*n) if n else 0.0,'points':points,'opponents':n,'threshold_bp_used':bp,'pass_mode':mode,'top_bp':top_bp,'submitted_at':new['submitted_at'],
             'rank_estimate':{'rank':myrank,'of':len(ranking),'is_provisional':True},'reward':entitlement_public(reward),
             'nemesis':engine.nemesis(strategy,allrows,participant_id=me['id'],analysis=analysis),'pool_size':len(allrows)}
         c.execute('UPDATE submissions SET response_json=? WHERE id=?',(dumps(resp),new['id']))
@@ -515,7 +528,7 @@ def dashboard_in(c):
         'seed_count':c.scalar('SELECT COUNT(*) FROM submissions WHERE is_seed=1'),'participant_count':c.scalar('SELECT COUNT(*) FROM participants'),
         'submission_count':c.scalar(f'SELECT COUNT(*) FROM submissions WHERE is_seed=0 AND {pool_scope(test)}'),
         'today_submissions':c.scalar('SELECT COUNT(*) FROM submissions WHERE is_seed=0 AND day_no=?',(day['day_no'],)),
-        'threshold_bp':threshold(c,day['day_no']),'threshold_locked':not test and bool(day['ever_opened'] or day['threshold_applied']),
+        'threshold_bp':threshold(c,day['day_no']),'pass_mode':(pass_rule(c,day['day_no']) or (None,))[0],'threshold_locked':not test and bool(day['ever_opened'] or day['threshold_applied']),
         'threshold_applied':bool(day['threshold_applied']),'purged':db.config(c,'purged')=='true','db_mode':'postgresql' if c.postgres else 'sqlite',
         'test_mode':test,'test_day':TEST_DAY,'test_submissions':c.scalar('SELECT COUNT(*) FROM submissions WHERE day_no=?',(TEST_DAY,))}
 
@@ -592,16 +605,17 @@ def suggest(token):
         return {'value_bp':engine.threshold_suggestion(rows,analysis=analysis_in(c,rows,test)),'percentile':85,'pool_size':len(rows)}
 
 def set_threshold(token,payload):
-    value=payload.get('value_bp'); reason=reason_text(payload); source=payload.get('source','MANUAL')
+    value=payload.get('value_bp'); reason=reason_text(payload); source=payload.get('source','MANUAL'); mode=payload.get('mode','LIVE')
+    need(mode in ('LIVE','FIXED'),'INVALID_INPUT','판정 방식을 확인해 주세요.',400)
     need(type(value) is int and 0<=value<=10000,'INVALID_INPUT','임계값은 0~10000 만분율 정수예요.',400)
     need(source in ('MANUAL','SUGGESTION'),'INVALID_INPUT','설정 출처를 확인해 주세요.',400)
     with db.transaction(write=True) as c:
         require_admin(c,token); day=get_day(c)
         need(is_test(day) or (not day['ever_opened'] and day['booth_state']=='CLOSED' and not day['threshold_applied']),'THRESHOLD_LOCKED','임계값은 개장 전 한 번만 적용할 수 있어요.')
-        c.execute('INSERT INTO threshold_history(id,day_no,value_bp,source,reason,set_by,set_at) VALUES(?,?,?,?,?,?,?)',(uid(),day['day_no'],value,source,reason,'ADMIN',stamp()))
+        c.execute('INSERT INTO threshold_history(id,day_no,value_bp,source,reason,set_by,set_at,mode) VALUES(?,?,?,?,?,?,?,?)',(uid(),day['day_no'],value,source,reason,'ADMIN',stamp(),mode))
         c.execute('UPDATE day_config SET threshold_applied=1 WHERE day_no=?',(day['day_no'],))
-        audit(c,'THRESHOLD_SET',reason,{'value_bp':value,'day_no':day['day_no'],'source':source}); db.bump(c)
-        return {'value_bp':value}
+        audit(c,'THRESHOLD_SET',reason,{'mode':mode,'value_bp':value,'day_no':day['day_no'],'source':source}); db.bump(c)
+        return {'mode':mode,'value_bp':value}
 
 def seed_list(c):
     rows=c.all('SELECT id,l1,l2,l3,l4,l5,tag,author,submitted_at FROM submissions WHERE is_seed=1 ORDER BY submitted_at,id')
@@ -680,11 +694,11 @@ def submission_log(token,day=None):
         day_no=get_day(c)['day_no'] if day in (None,'') else None if day=='ALL' else int(day) if str(day).isdigit() else -1
         need(day_no is None or day_no in REAL_DAYS+(TEST_DAY,),'INVALID_DAY','운영일을 확인해 주세요.',400)
         where='s.is_seed=0'+('' if day_no is None else ' AND s.day_no=?')
-        rows=c.all(f'SELECT s.id,s.day_no,s.attempt_no,s.participant_id,s.l1,s.l2,s.l3,s.l4,s.l5,s.points,s.opponents,s.submitted_at,p.kind,p.nickname,p.name_hidden,p.real_name,i.google_sub AS verified_school_subject,e.id AS e_id,e.code,e.kind AS e_kind,e.choice,e.status,e.issued_at,e.claimed_at,e.premium_exhausted FROM submissions s JOIN participants p ON p.id=s.participant_id LEFT JOIN school_identities i ON i.participant_id=p.id LEFT JOIN entitlements e ON e.submission_id=s.id WHERE {where} ORDER BY s.submitted_at DESC,s.attempt_no DESC,s.id',() if day_no is None else (day_no,))
+        rows=c.all(f'SELECT s.id,s.day_no,s.attempt_no,s.participant_id,s.l1,s.l2,s.l3,s.l4,s.l5,s.points,s.opponents,s.top_bp,s.submitted_at,p.kind,p.nickname,p.name_hidden,p.real_name,i.google_sub AS verified_school_subject,e.id AS e_id,e.code,e.kind AS e_kind,e.choice,e.status,e.issued_at,e.claimed_at,e.premium_exhausted FROM submissions s JOIN participants p ON p.id=s.participant_id LEFT JOIN school_identities i ON i.participant_id=p.id LEFT JOIN entitlements e ON e.submission_id=s.id WHERE {where} ORDER BY s.submitted_at DESC,s.attempt_no DESC,s.id',() if day_no is None else (day_no,))
         items=[]
         for r in rows:
             items.append({'id':r['id'],'day_no':r['day_no'],'attempt_no':r['attempt_no'],'participant_id':r['participant_id'],'nickname':display_name(r),'kind':r['kind'],
-                'strategy':[r['l1'],r['l2'],r['l3'],r['l4'],r['l5']],'points':r['points'],'opponents':r['opponents'],'win_rate':r['points']/(2*r['opponents']) if r['opponents'] else 0.0,'submitted_at':r['submitted_at'],
+                'strategy':[r['l1'],r['l2'],r['l3'],r['l4'],r['l5']],'points':r['points'],'opponents':r['opponents'],'win_rate':r['points']/(2*r['opponents']) if r['opponents'] else 0.0,'top_bp':r['top_bp'],'submitted_at':r['submitted_at'],
                 'entitlement':None if r['e_id'] is None else {'id':r['e_id'],'code':r['code'],'kind':r['e_kind'],'choice':r['choice'],'status':r['status'],'issued_at':r['issued_at'],'claimed_at':r['claimed_at'],'premium_exhausted':bool(r['premium_exhausted'])}})
         return {'day_no':day_no,'items':items}
 
@@ -835,10 +849,10 @@ def export_data(token):
         # Exports are operational, not identity backups. No personal identity or session material.
         tables={}
         # Test-mode play is rehearsal data, not event records.
-        tables['submissions']=c.all(f'SELECT id,day_no,attempt_no,l1,l2,l3,l4,l5,is_seed,is_ranked,points,opponents,threshold_bp_used,submitted_at FROM submissions WHERE {pool_scope(False)} ORDER BY submitted_at')
+        tables['submissions']=c.all(f'SELECT id,day_no,attempt_no,l1,l2,l3,l4,l5,is_seed,is_ranked,points,opponents,threshold_bp_used,top_bp,submitted_at FROM submissions WHERE {pool_scope(False)} ORDER BY submitted_at')
         tables['entitlements']=c.all(f"SELECT e.* FROM entitlements e JOIN submissions s ON s.id=e.submission_id WHERE {pool_scope(False,'s.')} ORDER BY e.issued_at")
         tables['inventory_ledger']=c.all('SELECT * FROM inventory_ledger ORDER BY at')
-        tables['threshold_history']=c.all('SELECT id,day_no,value_bp,source,set_at FROM threshold_history WHERE day_no!=? ORDER BY set_at',(TEST_DAY,))
+        tables['threshold_history']=c.all('SELECT id,day_no,mode,value_bp,source,set_at FROM threshold_history WHERE day_no!=? ORDER BY set_at',(TEST_DAY,))
         tables['day_config']=c.all('SELECT * FROM day_config WHERE day_no!=? ORDER BY day_no',(TEST_DAY,))
         tables['rank_freeze']=[]
         for row in c.all('SELECT * FROM rank_freeze'):

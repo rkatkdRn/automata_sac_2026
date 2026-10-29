@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS submissions (
  is_seed INTEGER NOT NULL DEFAULT 0, is_ranked INTEGER NOT NULL DEFAULT 1,
  points INTEGER NOT NULL DEFAULT 0, opponents INTEGER NOT NULL DEFAULT 0,
  threshold_bp_used INTEGER NOT NULL DEFAULT 0, submitted_at TEXT NOT NULL,
- response_json TEXT, tag TEXT NOT NULL DEFAULT '', author TEXT NOT NULL DEFAULT '',
+ response_json TEXT, tag TEXT NOT NULL DEFAULT '', author TEXT NOT NULL DEFAULT '', top_bp INTEGER,
  CHECK(l1+l2+l3+l4+l5=101), UNIQUE(participant_id,day_no,attempt_no)
 );
 CREATE INDEX IF NOT EXISTS submissions_participant ON submissions(participant_id,day_no);
@@ -65,7 +65,8 @@ CREATE TABLE IF NOT EXISTS day_config (
 );
 CREATE TABLE IF NOT EXISTS threshold_history (
  id TEXT PRIMARY KEY, day_no INTEGER NOT NULL, value_bp INTEGER NOT NULL,
- source TEXT NOT NULL, reason TEXT NOT NULL, set_by TEXT NOT NULL, set_at TEXT NOT NULL
+ source TEXT NOT NULL, reason TEXT NOT NULL, set_by TEXT NOT NULL, set_at TEXT NOT NULL,
+ mode TEXT NOT NULL DEFAULT 'FIXED'
 );
 CREATE TABLE IF NOT EXISTS inventory_ledger (
  id TEXT PRIMARY KEY, item TEXT NOT NULL, delta INTEGER NOT NULL, reason TEXT NOT NULL,
@@ -148,6 +149,13 @@ def _connect():
     return Connection(raw, postgres)
 
 
+def add_column(conn, table, column, ddl):
+    if conn.postgres:
+        conn.execute(f'ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {ddl}')
+    elif column not in {row['name'] for row in conn.all(f'PRAGMA table_info({table})')}:
+        conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {ddl}')
+
+
 def initialize(force=False):
     name, postgres = target()
     with _INIT_LOCK:
@@ -162,6 +170,9 @@ def initialize(force=False):
                 conn.execute('BEGIN IMMEDIATE')
             for stmt in SCHEMA.split(';'):
                 if stmt.strip(): conn.execute(stmt)
+            # Columns added after the event database was created. Existing thresholds were all win rates.
+            add_column(conn,'threshold_history','mode',"TEXT NOT NULL DEFAULT 'FIXED'")
+            add_column(conn,'submissions','top_bp','INTEGER')
             for day, date, chew, premium in [(1,'2026-10-30',188,40),(2,'2026-10-31',338,72),(3,'2026-11-01',450,95),(TEST_DAY,'2026-10-27',188,40)]:
                 conn.execute('INSERT INTO day_config(day_no,date,sessions_json,mychew_cap_cum,premium_cap_cum) VALUES(?,?,?,?,?) ON CONFLICT(day_no) DO NOTHING', (day,date,'[["10:00","13:00"],["14:00","17:00"]]',chew,premium))
             for key,value in [('active_day','1'),('version','0'),('score_cache','{}'),('board_cache','{}'),('cycle','null'),('cycle_at',''),('purged','false')]:
