@@ -83,6 +83,10 @@ def booth(tmp_path, monkeypatch):
         def client(self):
             return stack.enter_context(TestClient(app))
 
+        def tries(self, n):
+            # The booth allows one try a day; multi-try mechanics (renumbering etc.) still hold for any limit.
+            monkeypatch.setattr(service, "MAX_ATTEMPTS", n)
+
         def guest(self, nickname=None):
             client = stack.enter_context(TestClient(app))
             ok(client.post("/api/session", json={"kind": "GUEST", "nickname": nickname or "손님" + uuid.uuid4().hex[:5], "consent": True}))
@@ -128,28 +132,25 @@ def test_T03_invalid_does_not_consume_attempt(booth):
     guest = booth.guest()
     for strategy in [[20] * 5, [-1, 25, 25, 25, 27], [0.0, 25, 25, 25, 26], [True, 25, 25, 25, 25], ["0", 25, 25, 25, 26], [101, 0, 0, 0]]:
         error(booth.submit(guest, strategy), "INVALID_STRATEGY")
-    assert ok(guest.get("/api/state"))["attempts_left"] == 3
+    assert ok(guest.get("/api/state"))["attempts_left"] == 1
     assert ok(guest.get("/api/me/submissions"))["items"] == []
 
 
-def test_T04_T05_T13_three_attempts_next_day_and_self_exclusion(booth):
+def test_T04_T05_T13_one_attempt_next_day_and_self_exclusion(booth):
     booth.open()
     # Students retain their identity across days; guests now expire after 12h.
     guest, response = booth.student()
     ok(response)
     first = ok(booth.submit(guest))
-    assert first["attempt_no"] == 1 and first["reward"]["kind"] == "BASIC"
-    second = ok(booth.submit(guest, WIN))
-    third = ok(booth.submit(guest, LOSE))
-    assert second["reward"] is None and third["reward"] is None
-    assert second["opponents"] == third["opponents"] == 50
-    error(booth.submit(guest), "LIMIT_REACHED")
+    assert first["attempt_no"] == 1 and first["attempts_left"] == 0 and first["reward"]["kind"] == "BASIC"
+    error(booth.submit(guest, WIN), "LIMIT_REACHED")
+    assert ok(guest.get("/api/state"))["max_attempts"] == 1
     booth.next_day()
     booth.open()
     again = ok(booth.submit(guest))
-    assert again["attempt_no"] == 1 and again["attempts_left"] == 2
-    assert again["opponents"] == 50
-    assert again["pool_size"] >= 53
+    assert again["attempt_no"] == 1 and again["attempts_left"] == 0
+    # The player's own day-1 play is in the pool but never an opponent.
+    assert again["opponents"] == 50 and again["pool_size"] == 52
 
 
 def test_T06_threshold_locks_after_any_open_even_close(booth):
@@ -186,15 +187,21 @@ def test_T08_cap_reopen_claim_once_and_mychew_releases_reservation(booth):
     booth.open(0)
     guest = booth.guest()
     first = ok(booth.submit(guest, WIN))
-    error(booth.submit(guest, WIN), "CAP_REACHED")
+    error(booth.submit(booth.guest(), WIN), "CAP_REACHED")
     reward = first["reward"]
+    assert reward["choices"] == ["SESAME", "ACE"]
     claim = f'/api/entitlements/{reward["entitlement_id"]}/claim'
-    ok(guest.post(claim, json={"choice": "MYCHEW"}))
-    error(guest.post(claim, json={"choice": "MYCHEW"}), "ALREADY_CLAIMED")
+    # A top voucher is 마이쮸 plus one premium item, never 마이쮸 alone.
+    error(guest.post(claim, json={"choice": "MYCHEW"}), "INVALID_CHOICE")
+    ok(guest.post(claim, json={"choice": "ACE"}))
+    error(guest.post(claim, json={"choice": "ACE"}), "ALREADY_CLAIMED")
     counters = ok(booth.admin.get("/api/admin/dashboard"))["counters"]
-    assert counters == {"mychew_used": 1, "premium_reserved": 0}
+    assert counters == {"mychew_used": 1, "premium_reserved": 1}
+    inventory = ok(booth.admin.get("/api/admin/inventory"))["inventory"]
+    assert inventory == {"MYCHEW": 449, "SESAME": 48, "ACE": 46}
     ok(booth.admin.post("/api/admin/booth", json={"action": "REOPEN", "reason": "재고 다시 확인"}))
-    assert ok(booth.submit(guest, WIN))["attempt_no"] == 2
+    error(booth.submit(guest, WIN), "LIMIT_REACHED")
+    assert ok(booth.submit(booth.guest(), WIN))["attempt_no"] == 1
     audit = ok(booth.admin.get("/api/admin/audit"))["items"]
     assert any("재고 다시 확인" in str(a) for a in audit)
 
@@ -232,7 +239,7 @@ def test_T09_cycle_is_held_at_least_sixty_seconds(booth):
     held = ok(booth.admin.get("/api/scoreboard"))["cycle"]
     assert {r["submission_id"] for r in held} == original
     booth.clock[0] += timedelta(seconds=61)
-    ok(booth.submit(newcomer, strategy))
+    ok(booth.submit(booth.guest("새순환둘"), strategy))
     refreshed = ok(booth.admin.get("/api/scoreboard"))["cycle"]
     assert {r["submission_id"] for r in refreshed} != original
 
@@ -301,7 +308,7 @@ def test_T14_sqlite_consistent_backup_restores_counts(booth, tmp_path):
     with sqlite3.connect(booth.path) as source, sqlite3.connect(backup) as dest:
         source.backup(dest)
     before = ok(booth.admin.get("/api/admin/dashboard"))
-    ok(booth.submit(guest, WIN))
+    ok(booth.submit(booth.guest(), WIN))
     with sqlite3.connect(backup) as restored:
         assert restored.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert restored.execute("SELECT COUNT(*) FROM submissions WHERE is_seed=0").fetchone()[0] == before["submission_count"]
@@ -317,8 +324,8 @@ def test_T15_student_multidevice_real_name_and_consent(booth):
     second = ok(response)
     assert second["participant_id"] == identity["participant_id"]
     assert second["nickname"] == identity["nickname"]
-    assert second["attempts_left"] == 2
-    assert ok(booth.submit(b))["attempt_no"] == 2
+    assert second["attempts_left"] == 0
+    error(booth.submit(b), "LIMIT_REACHED")
     # the same 학번 with a different name never takes over the record
     _, response = booth.student(name="다른사람이름", nickname="가로채기")
     error(response, "STUDENT_ID_CONFLICT")
@@ -401,7 +408,7 @@ def test_day_change_rejects_old_unsaved_request_but_replays_saved_request(booth)
     assert ok(guest.post("/api/submissions", json=body)) == first
     body["request_id"] = uuid.uuid4().hex
     error(guest.post("/api/submissions", json=body), "DAY_CHANGED")
-    assert ok(guest.get("/api/state"))["attempts_left"] == 3
+    assert ok(guest.get("/api/state"))["attempts_left"] == 1
 
 
 def test_reward_choice_persists_before_claim_and_is_idempotent(booth):
@@ -409,35 +416,34 @@ def test_reward_choice_persists_before_claim_and_is_idempotent(booth):
     guest = booth.guest()
     reward = ok(booth.submit(guest, WIN))["reward"]
     eid = reward["entitlement_id"]
-    chosen = ok(guest.post(f"/api/entitlements/{eid}/choice", json={"choice": "MYCHEW"}))
-    assert chosen["choice"] == "MYCHEW" and chosen["status"] == "ISSUED"
+    chosen = ok(guest.post(f"/api/entitlements/{eid}/choice", json={"choice": "ACE"}))
+    assert chosen["choice"] == "ACE" and chosen["status"] == "ISSUED"
     counters = ok(booth.admin.get("/api/admin/dashboard"))["counters"]
-    assert counters == {"mychew_used": 1, "premium_reserved": 0}
-    assert ok(guest.post(f"/api/entitlements/{eid}/choice", json={"choice": "MYCHEW"})) == chosen
+    assert counters == {"mychew_used": 1, "premium_reserved": 1}
+    assert ok(guest.post(f"/api/entitlements/{eid}/choice", json={"choice": "ACE"})) == chosen
     assert ok(booth.admin.get("/api/admin/dashboard"))["counters"] == counters
-    assert ok(guest.get("/api/me/submissions"))["items"][0]["reward"]["choice"] == "MYCHEW"
+    assert ok(guest.get("/api/me/submissions"))["items"][0]["reward"]["choice"] == "ACE"
     claims = ok(booth.admin.get("/api/admin/claims"))["items"]
-    assert next(r for r in claims if r["id"] == eid)["choice"] == "MYCHEW"
+    assert next(r for r in claims if r["id"] == eid)["choice"] == "ACE"
     stock = ok(booth.admin.get("/api/admin/inventory"))["inventory"]
-    assert stock["MYCHEW"] == 450  # choosing reserves; physical stock changes on claim
-    ok(guest.post(f"/api/entitlements/{eid}/claim", json={"choice": "MYCHEW"}))
-    assert ok(booth.admin.get("/api/admin/inventory"))["inventory"]["MYCHEW"] == 449
+    assert stock["MYCHEW"] == 450 and stock["ACE"] == 47  # choosing reserves; physical stock changes on claim
+    ok(guest.post(f"/api/entitlements/{eid}/claim", json={"choice": "ACE"}))
+    assert ok(booth.admin.get("/api/admin/inventory"))["inventory"] == {"MYCHEW": 449, "SESAME": 48, "ACE": 46}
+    assert ok(booth.admin.get("/api/admin/claims"))["by_item"] == {"MYCHEW": 1, "SESAME": 0, "ACE": 1}
     assert ok(booth.admin.get("/api/admin/dashboard"))["counters"] == counters
-    assert guest.post(f"/api/entitlements/{eid}/choice", json={"choice": "ACE"}).status_code == 409
+    assert guest.post(f"/api/entitlements/{eid}/choice", json={"choice": "SESAME"}).status_code == 409
 
 
-def test_choice_transfer_obeys_cap_and_releases_previous_reservation(booth):
+def test_top_voucher_uses_a_mychew_too_so_the_mychew_cap_binds(booth):
     booth.configure(premium=2, mychew=1, rule="PREMIUM_SOFT")
     booth.open(0)
-    a, b = booth.guest("선택하나"), booth.guest("선택둘")
+    a = booth.guest("선택하나")
     ea = ok(booth.submit(a, WIN))["reward"]["entitlement_id"]
-    eb = ok(booth.submit(b, WIN))["reward"]["entitlement_id"]
-    ok(a.post(f"/api/entitlements/{ea}/choice", json={"choice": "MYCHEW"}))
-    error(b.post(f"/api/entitlements/{eb}/choice", json={"choice": "MYCHEW"}), "OUT_OF_STOCK_CHOICE")
     assert ok(booth.admin.get("/api/admin/dashboard"))["counters"] == {"mychew_used": 1, "premium_reserved": 1}
+    # Premium is left, but the next top player would need a 마이쮸 as well.
+    error(booth.submit(booth.guest("선택둘"), WIN), "CAP_REACHED")
+    error(a.post(f"/api/entitlements/{ea}/choice", json={"choice": "MYCHEW"}), "INVALID_CHOICE")
     ok(a.post(f"/api/entitlements/{ea}/choice", json={"choice": "ACE"}))
-    assert ok(booth.admin.get("/api/admin/dashboard"))["counters"] == {"mychew_used": 0, "premium_reserved": 2}
-    ok(b.post(f"/api/entitlements/{eb}/choice", json={"choice": "MYCHEW"}))
     assert ok(booth.admin.get("/api/admin/dashboard"))["counters"] == {"mychew_used": 1, "premium_reserved": 1}
 
 
@@ -551,6 +557,7 @@ TEST_DAY = 9
 def test_test_mode_is_isolated_and_leaves_real_days_unlocked(booth):
     admin = booth.admin
     ok(admin.post("/api/admin/day", json={"day_no": TEST_DAY}))
+    booth.tries(3)
     # Outside every real date and session: test mode ignores the schedule.
     booth.clock[0] = datetime(2026, 10, 27, 22, 0, tzinfo=KST)
     booth.open(threshold=0)
@@ -625,6 +632,7 @@ def test_test_mode_opens_and_scores_without_seeds(booth):
 
 def test_admin_submission_log_delete_returns_try_and_renumbers(booth):
     admin = booth.admin
+    booth.tries(3)
     booth.open()
     guest = booth.guest("기록손님")
     first = ok(booth.submit(guest, WIN))
@@ -655,6 +663,7 @@ def test_admin_submission_log_delete_returns_try_and_renumbers(booth):
 
 def test_admin_snack_adjustments_keep_stock_ledger_true(booth):
     admin = booth.admin
+    booth.tries(2)
     booth.open(0)
     guest = booth.guest("간식손님")
     first = ok(booth.submit(guest, WIN))
@@ -664,18 +673,24 @@ def test_admin_snack_adjustments_keep_stock_ledger_true(booth):
     snack = lambda sid, **body: admin.post(f"/api/admin/submissions/{sid}/snack", json={"reason": "현장 정정", **body})
     entry = lambda sid: next(r for r in ok(admin.get("/api/admin/submissions"))["items"] if r["id"] == sid)["entitlement"]
 
+    # A top voucher hands out a 마이쮸 and the premium item.
     ok(snack(first["id"], kind="TOP_CHOICE", choice="SESAME", status="CLAIMED"))
-    assert stock()["SESAME"] == start["SESAME"] - 1 and entry(first["id"])["claimed_at"]
-    # Correcting the item handed out moves the stock between items.
+    assert stock() == {**start, "MYCHEW": start["MYCHEW"] - 1, "SESAME": start["SESAME"] - 1} and entry(first["id"])["claimed_at"]
+    # Correcting the item handed out moves the stock between items; the 마이쮸 stays out.
     ok(snack(first["id"], kind="TOP_CHOICE", choice="ACE", status="CLAIMED"))
-    assert stock() == {**start, "ACE": start["ACE"] - 1}
-    # Back to unclaimed: the item stays out unless it was physically returned.
+    assert stock() == {**start, "MYCHEW": start["MYCHEW"] - 1, "ACE": start["ACE"] - 1}
+    # Downgrading a claimed top voucher to 마이쮸 returns only the premium item.
+    ok(snack(first["id"], kind="BASIC", status="CLAIMED"))
+    assert stock() == {**start, "MYCHEW": start["MYCHEW"] - 1}
+    ok(snack(first["id"], kind="TOP_CHOICE", choice="ACE", status="CLAIMED"))
+    # Back to unclaimed: the items stay out unless they were physically returned.
     ok(snack(first["id"], kind="TOP_CHOICE", choice="ACE", status="ISSUED"))
     assert stock()["ACE"] == start["ACE"] - 1 and entry(first["id"])["claimed_at"] is None
     ok(snack(first["id"], kind="TOP_CHOICE", choice="ACE", status="CLAIMED"))
     ok(snack(first["id"], kind=None, return_stock=True))
-    assert stock()["ACE"] == start["ACE"] - 1 and entry(first["id"]) is None
+    assert stock() == {**start, "MYCHEW": start["MYCHEW"] - 1, "ACE": start["ACE"] - 1} and entry(first["id"]) is None
     error(snack(first["id"], kind="TOP_CHOICE", status="CLAIMED"), "INVALID_CHOICE")
+    error(snack(first["id"], kind="TOP_CHOICE", choice="MYCHEW", status="ISSUED"), "INVALID_CHOICE")
     error(snack(first["id"], kind="BASIC", choice="ACE", status="ISSUED"), "INVALID_CHOICE")
     # A voucher can be issued on any play, here the second try.
     ok(snack(second["id"], kind="BASIC", status="ISSUED"))
@@ -684,7 +699,7 @@ def test_admin_snack_adjustments_keep_stock_ledger_true(booth):
     assert ok(admin.get("/api/admin/dashboard"))["counters"] == {"mychew_used": 1, "premium_reserved": 0}
     ok(guest.post(f"/api/entitlements/{created['id']}/claim", json={"choice": "MYCHEW"}))
     ok(admin.post(f"/api/admin/submissions/{second['id']}/delete", json={"reason": "중복", "return_stock": True}))
-    assert stock()["MYCHEW"] == start["MYCHEW"]
+    assert stock()["MYCHEW"] == start["MYCHEW"] - 1
     assert ok(admin.get("/api/admin/dashboard"))["counters"]["mychew_used"] == 0
     assert any(r["reason"] == "ADMIN_ADJUST" for r in ok(admin.get("/api/admin/inventory"))["ledger"])
 

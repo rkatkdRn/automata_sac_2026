@@ -15,6 +15,8 @@ from zoneinfo import ZoneInfo
 from . import db, engine
 
 ITEMS = ('MYCHEW', 'SESAME', 'ACE')
+PREMIUM = ('SESAME', 'ACE')
+MAX_ATTEMPTS = 1
 COOKIE = 'blotto_session'
 ADMIN_COOKIE = 'blotto_admin'
 GUEST_SESSION_HOURS = 12
@@ -132,6 +134,11 @@ def top_share_bp(rows, analysis, row_id):
     better=sum(1 for r in rows if engine.rate_fraction(analysis[r['id']])>mine)
     return -(-(better+1)*10000//len(rows))
 
+# Every voucher hands over 1 마이쮸; a top voucher adds 1 premium item (SESAME or ACE).
+def handed(kind, choice):
+    if not kind: return []
+    return ['MYCHEW',choice] if kind=='TOP_CHOICE' and choice in PREMIUM else ['MYCHEW']
+
 def inventory(c):
     result={x:0 for x in ITEMS}
     for row in c.all('SELECT item,SUM(delta) AS n FROM inventory_ledger GROUP BY item'):
@@ -139,12 +146,12 @@ def inventory(c):
     return result
 
 def counters(c, test=False):
-    row=c.one(f"SELECT COALESCE(SUM(CASE WHEN e.kind='BASIC' OR e.choice='MYCHEW' THEN 1 ELSE 0 END),0) AS mychew_used, COALESCE(SUM(CASE WHEN e.kind='TOP_CHOICE' AND (e.choice IS NULL OR e.choice IN ('SESAME','ACE')) THEN 1 ELSE 0 END),0) AS premium_reserved FROM entitlements e JOIN submissions s ON s.id=e.submission_id WHERE e.status!='VOID' AND {pool_scope(test,'s.')}")
+    row=c.one(f"SELECT COUNT(*) AS mychew_used, COALESCE(SUM(CASE WHEN e.kind='TOP_CHOICE' AND (e.choice IS NULL OR e.choice IN ('SESAME','ACE')) THEN 1 ELSE 0 END),0) AS premium_reserved FROM entitlements e JOIN submissions s ON s.id=e.submission_id WHERE e.status!='VOID' AND {pool_scope(test,'s.')}")
     return row
 
 def pending(c):
     """Physical stock reservations; test entitlements never touch real stock."""
-    row=c.one(f"SELECT COALESCE(SUM(CASE WHEN e.kind='BASIC' OR e.choice='MYCHEW' THEN 1 ELSE 0 END),0) AS mychew, COALESCE(SUM(CASE WHEN e.kind='TOP_CHOICE' AND (e.choice IS NULL OR e.choice IN ('SESAME','ACE')) THEN 1 ELSE 0 END),0) AS premium FROM entitlements e JOIN submissions s ON s.id=e.submission_id WHERE e.status='ISSUED' AND {pool_scope(False,'s.')}")
+    row=c.one(f"SELECT COUNT(*) AS mychew, COALESCE(SUM(CASE WHEN e.kind='TOP_CHOICE' AND (e.choice IS NULL OR e.choice IN ('SESAME','ACE')) THEN 1 ELSE 0 END),0) AS premium FROM entitlements e JOIN submissions s ON s.id=e.submission_id WHERE e.status='ISSUED' AND {pool_scope(False,'s.')}")
     return row
 
 def schedule(day):
@@ -164,7 +171,7 @@ def state_in(c, token=None):
     purged=db.config(c,'purged')=='true'
     booth=day['booth_state']
     return {'day_no':day['day_no'],'booth_state':booth,'open_now':bool(booth=='OPEN' and within and not purged),
-        'next_open':next_open,'attempts_left':max(0,3-count),'mychew_left':max(0,day['mychew_cap_cum']-counters(c,is_test(day))['mychew_used']),'test_mode':is_test(day),
+        'next_open':next_open,'attempts_left':max(0,MAX_ATTEMPTS-count),'max_attempts':MAX_ATTEMPTS,'mychew_left':max(0,day['mychew_cap_cum']-counters(c,is_test(day))['mychew_used']),'test_mode':is_test(day),
         'participant_id':person['id'] if person else None,'nickname':display_name(person) if person else None,
         'kind':person['kind'] if person else None,'needs_nickname':needs_nickname(person),'auth_method':('STUDENT_ID' if person['kind']=='STUDENT' else 'GUEST') if person else None,
         'server_time':stamp(),'privacy_contact':os.getenv('PRIVACY_CONTACT','Automata 부스 운영진'),
@@ -220,7 +227,7 @@ def session_public(c,person):
     day=get_day(c)
     attempts=c.scalar('SELECT COUNT(*) FROM submissions WHERE participant_id=? AND day_no=?',(person['id'],day['day_no']))
     return {'participant_id':person['id'],'nickname':display_name(person),'kind':person['kind'],'needs_nickname':needs_nickname(person),
-            'auth_method':'STUDENT_ID' if person['kind']=='STUDENT' else 'GUEST','attempts_left':max(0,3-attempts)}
+            'auth_method':'STUDENT_ID' if person['kind']=='STUDENT' else 'GUEST','attempts_left':max(0,MAX_ATTEMPTS-attempts)}
 
 
 # In-school students sign in with 학번, 이름 and a nickname. The same 학번 and 이름 continue the
@@ -328,7 +335,7 @@ def incremental_analysis(rows, analysis, new):
 def entitlement_public(e):
     if not e: return None
     return {'entitlement_id':e['id'],'code':e['code'],'kind':e['kind'],'premium_exhausted':bool(e['premium_exhausted']),
-        'choices':list(ITEMS) if e['kind']=='TOP_CHOICE' else ['MYCHEW'],'status':e['status'],'choice':e['choice'],'claimed_at':e['claimed_at']}
+        'choices':list(PREMIUM) if e['kind']=='TOP_CHOICE' else ['MYCHEW'],'status':e['status'],'choice':e['choice'],'claimed_at':e['claimed_at']}
 
 def close_if_cap(c,day):
     if day['cap_override'] or day['booth_state']!='OPEN': return
@@ -354,7 +361,7 @@ def submit(token,payload):
         need(day['booth_state']!='CAP_REACHED','CAP_REACHED','오늘 간식 상한에 도달했어요.')
         need(st['open_now'],'BOOTH_CLOSED','지금은 제출할 수 없어요. 운영 시간을 확인해 주세요.')
         done=c.scalar('SELECT COUNT(*) FROM submissions WHERE participant_id=? AND day_no=?',(me['id'],day['day_no']))
-        need(done<3,'LIMIT_REACHED','오늘의 도전 3회를 모두 사용했어요.')
+        need(done<MAX_ATTEMPTS,'LIMIT_REACHED','오늘의 도전을 이미 마쳤어요. 내일 다시 와 주세요.')
         rows=pool_rows(c,for_submission=True,test=test); analysis=analysis_in(c,rows,test)
         opponent_rows=[r for r in rows if r['participant_id']!=me['id']]
         # Test mode may run with any number of seeds, even none.
@@ -370,8 +377,7 @@ def submit(token,payload):
             count=counters(c,test); stock=inventory(c); reserved=pending(c)
             premium_available=count['premium_reserved']<day['premium_cap_cum'] and (test or stock['SESAME']+stock['ACE']>reserved['premium'])
             kind='TOP_CHOICE' if qualified and premium_available else 'BASIC'
-            if kind=='BASIC':
-                need(count['mychew_used']<day['mychew_cap_cum'] and (test or stock['MYCHEW']>reserved['mychew']),'CAP_REACHED','지급 가능한 마이쮸가 없어요. 스태프에게 문의해 주세요.')
+            need(count['mychew_used']<day['mychew_cap_cum'] and (test or stock['MYCHEW']>reserved['mychew']),'CAP_REACHED','지급 가능한 마이쮸가 없어요. 스태프에게 문의해 주세요.')
             reward={'id':uid(),'code':''.join(secrets.choice('23456789ABCDEFGHJKLMNPQRSTUVWXYZ') for _ in range(6)),'kind':kind,'premium_exhausted':int(qualified and not premium_available),'choice':None,'status':'ISSUED','claimed_at':None}
             while c.one('SELECT id FROM entitlements WHERE code=?',(reward['code'],)):
                 reward['code']=''.join(secrets.choice('23456789ABCDEFGHJKLMNPQRSTUVWXYZ') for _ in range(6))
@@ -381,7 +387,7 @@ def submit(token,payload):
             c.execute('INSERT INTO entitlements(id,submission_id,code,kind,premium_exhausted,issued_at) VALUES(?,?,?,?,?,?)',(reward['id'],new['id'],reward['code'],reward['kind'],reward['premium_exhausted'],stamp()))
         ranking=engine.rank_rows(allrows,analysis=analysis)
         myrank=next((r['rank'] for r in ranking if r['participant_id']==me['id']),None)
-        resp={'id':new['id'],'day_no':day['day_no'],'attempt_no':done+1,'attempts_left':2-done,'strategy':strategy,'win_rate':points/(2*n) if n else 0.0,'points':points,'opponents':n,'threshold_bp_used':bp,'pass_mode':mode,'top_bp':top_bp,'submitted_at':new['submitted_at'],
+        resp={'id':new['id'],'day_no':day['day_no'],'attempt_no':done+1,'attempts_left':MAX_ATTEMPTS-1-done,'strategy':strategy,'win_rate':points/(2*n) if n else 0.0,'points':points,'opponents':n,'threshold_bp_used':bp,'pass_mode':mode,'top_bp':top_bp,'submitted_at':new['submitted_at'],
             'rank_estimate':{'rank':myrank,'of':len(ranking),'is_provisional':True},'reward':entitlement_public(reward),
             'nemesis':engine.nemesis(strategy,allrows,participant_id=me['id'],analysis=analysis),'pool_size':len(allrows)}
         c.execute('UPDATE submissions SET response_json=? WHERE id=?',(dumps(resp),new['id']))
@@ -407,37 +413,20 @@ def owned_entitlement(c,token,entitlement_id):
 
 
 def select_in(c,e,choice):
-    """Reserve a concrete item, including choice switches, under the game lock.
+    """Pick a voucher's item under the game lock: 마이쮸 for a basic one, SESAME or ACE for a top one.
 
-    Unchosen TOP_CHOICE reserves one generic premium unit. A selected premium
-    item reserves that physical item too. Excluding this entitlement from the
-    pending-item check makes retrying the same selection naturally idempotent.
+    Issuing already reserved the 마이쮸 and, for a top voucher, one generic premium unit.
+    A chosen premium item also reserves that physical item. Excluding this entitlement from
+    the pending-item check makes retrying the same selection naturally idempotent.
     """
-    need(choice in ITEMS and (e['kind']=='TOP_CHOICE' or choice=='MYCHEW'),'INVALID_CHOICE','간식을 골라 주세요.',400)
-    # Caps follow the entitlement's own mode, even if the admin has since switched days.
-    test=e['day_no']==TEST_DAY
-    day=get_day(c);caps=day
-    if test!=is_test(day):
-        caps=c.one('SELECT * FROM day_config WHERE day_no=?',(TEST_DAY if test else int(db.config(c,'real_day','1')),))
-    count=counters(c,test);stock=inventory(c)
-    if not test:
-        specific=c.scalar(f"SELECT COUNT(*) FROM entitlements e JOIN submissions s ON s.id=e.submission_id WHERE e.status='ISSUED' AND e.id!=? AND (e.choice=? OR (e.kind='BASIC' AND ?='MYCHEW')) AND {pool_scope(False,'s.')}",(e['id'],choice,choice))
-        need(stock[choice]>specific,'OUT_OF_STOCK_CHOICE','고른 간식이 소진되었거나 예약 중이에요. 다른 간식을 골라 주세요.')
-    old_group='MYCHEW' if e['kind']=='BASIC' or e['choice']=='MYCHEW' else 'PREMIUM'
-    new_group='MYCHEW' if choice=='MYCHEW' else 'PREMIUM'
-    if new_group=='MYCHEW':
-        additional=int(old_group!='MYCHEW')
-        need(count['mychew_used']+additional<=caps['mychew_cap_cum'],'OUT_OF_STOCK_CHOICE','마이쮸 상한에 도달했어요. 다른 간식을 골라 주세요.')
-    else:
-        additional=int(old_group!='PREMIUM')
-        need(count['premium_reserved']+additional<=caps['premium_cap_cum'],'OUT_OF_STOCK_CHOICE','고급 간식 상한에 도달했어요. 마이쮸를 골라 주세요.')
-        if not test:
-            other_premium=c.scalar(f"SELECT COUNT(*) FROM entitlements e JOIN submissions s ON s.id=e.submission_id WHERE e.status='ISSUED' AND e.id!=? AND e.kind='TOP_CHOICE' AND (e.choice IS NULL OR e.choice IN ('SESAME','ACE')) AND {pool_scope(False,'s.')}",(e['id'],))
-            need(stock['SESAME']+stock['ACE']>other_premium,'OUT_OF_STOCK_CHOICE','고급 간식 여유가 없어요. 마이쮸를 골라 주세요.')
+    need(choice in (PREMIUM if e['kind']=='TOP_CHOICE' else ('MYCHEW',)),'INVALID_CHOICE','간식을 골라 주세요.',400)
+    if e['day_no']!=TEST_DAY and choice in PREMIUM:
+        specific=c.scalar(f"SELECT COUNT(*) FROM entitlements e JOIN submissions s ON s.id=e.submission_id WHERE e.status='ISSUED' AND e.id!=? AND e.choice=? AND {pool_scope(False,'s.')}",(e['id'],choice))
+        need(inventory(c)[choice]>specific,'OUT_OF_STOCK_CHOICE','고른 간식이 소진되었거나 예약 중이에요. 다른 간식을 골라 주세요.')
     if e['choice']!=choice:
         c.execute('UPDATE entitlements SET choice=? WHERE id=?',(choice,e['id']))
         e['choice']=choice
-    return day
+    return get_day(c)
 
 
 def select_choice(token,entitlement_id,payload):
@@ -456,7 +445,8 @@ def claim(token,entitlement_id,payload):
         claimed_at=stamp()
         c.execute("UPDATE entitlements SET status='CLAIMED',choice=?,claimed_at=? WHERE id=?",(choice,claimed_at,entitlement_id))
         if e['day_no']!=TEST_DAY:
-            c.execute('INSERT INTO inventory_ledger(id,item,delta,reason,entitlement_id,at) VALUES(?,?,-1,?,?,?)',(uid(),choice,'CLAIM',entitlement_id,claimed_at))
+            for item in handed(e['kind'],choice):
+                c.execute('INSERT INTO inventory_ledger(id,item,delta,reason,entitlement_id,at) VALUES(?,?,-1,?,?,?)',(uid(),item,'CLAIM',entitlement_id,claimed_at))
         close_if_cap(c,day);db.bump(c)
         return {'status':'CLAIMED','choice':choice,'claimed_at':claimed_at,'code':e['code'],'entitlement_id':e['id']}
 
@@ -632,7 +622,8 @@ def claims(token,status=None):
         counts={'ISSUED':0,'CLAIMED':0,'VOID':0}; by_item={x:0 for x in ITEMS}; items=[]
         for row in rows:
             counts[row['status']]+=1
-            if row['status']=='CLAIMED': by_item[row['choice']]+=1
+            if row['status']=='CLAIMED':
+                for item in handed(row['kind'],row['choice']): by_item[item]+=1
             row['nickname']=display_name({**row,'kind':row.pop('p_kind')});row.pop('nickname_chosen',None);row.pop('name_hidden',None);row.pop('real_name',None);row.pop('verified_school_subject',None);row['premium_exhausted']=bool(row['premium_exhausted'])
             if not status or row['status']==status: items.append(row)
         return {'items':items,'counts':counts,'by_item':by_item}
@@ -661,7 +652,8 @@ def void_entitlement(token,entitlement_id,payload):
         if return_stock:
             need(e['status']=='CLAIMED','INVALID_INPUT','수령된 간식만 실물 반환할 수 있어요.',400)
             need(e['day_no']!=TEST_DAY,'INVALID_INPUT','테스트 수령권은 실물 재고와 관계없어요.',400)
-            c.execute('INSERT INTO inventory_ledger(id,item,delta,reason,entitlement_id,at) VALUES(?,?,1,?,?,?)',(uid(),e['choice'],'VOID_RETURN',e['id'],stamp()))
+            for item in handed(e['kind'],e['choice']):
+                c.execute('INSERT INTO inventory_ledger(id,item,delta,reason,entitlement_id,at) VALUES(?,?,1,?,?,?)',(uid(),item,'VOID_RETURN',e['id'],stamp()))
         c.execute("UPDATE entitlements SET status='VOID' WHERE id=?",(e['id'],));audit(c,'ENTITLEMENT_VOID',reason,{'id':e['id'],'return_stock':return_stock});db.bump(c)
         return {'ok':True}
 
@@ -694,18 +686,20 @@ def adjust_snack(token,submission_id,payload):
     need(kind in (None,'BASIC','TOP_CHOICE') and status in ('ISSUED','CLAIMED','VOID') and type(return_stock) is bool,'INVALID_INPUT','간식 수정 값을 확인해 주세요.',400)
     need(choice is None or choice in ITEMS,'INVALID_CHOICE','간식을 골라 주세요.',400)
     need(kind!='BASIC' or choice in (None,'MYCHEW'),'INVALID_CHOICE','마이쮸 수령권에는 마이쮸만 고를 수 있어요. 고급 선택권으로 바꿔 주세요.',400)
+    need(kind!='TOP_CHOICE' or choice in (None,*PREMIUM),'INVALID_CHOICE','고급 선택권은 마이쮸에 더해 참깨 크래커나 에이스를 골라요.',400)
     if kind=='BASIC': choice='MYCHEW'
     need(kind is None or status!='CLAIMED' or choice is not None,'INVALID_CHOICE','수령 완료로 바꾸려면 받은 간식을 골라 주세요.',400)
     with db.transaction(write=True) as c:
         require_admin(c,token);sub,e=admin_submission(c,submission_id);at=stamp();ent_id=e['id'] if e else uid()
-        given_before=e['choice'] if e and e['status']=='CLAIMED' else None
-        given_after=choice if kind and status=='CLAIMED' else None
-        if sub['day_no']!=TEST_DAY and given_before!=given_after:
+        given_before=handed(e['kind'],e['choice']) if e and e['status']=='CLAIMED' else []
+        given_after=handed(kind,choice) if status=='CLAIMED' else []
+        if sub['day_no']!=TEST_DAY:
             # A corrected item (claimed -> claimed) was never handed out, so it returns automatically.
-            if given_before and (given_after or return_stock):
-                c.execute('INSERT INTO inventory_ledger(id,item,delta,reason,entitlement_id,at) VALUES(?,?,1,?,?,?)',(uid(),given_before,'ADMIN_ADJUST',ent_id,at))
-            if given_after:
-                c.execute('INSERT INTO inventory_ledger(id,item,delta,reason,entitlement_id,at) VALUES(?,?,-1,?,?,?)',(uid(),given_after,'ADMIN_ADJUST',ent_id,at))
+            back=[x for x in given_before if x not in given_after] if given_after else given_before if return_stock else []
+            for item in back:
+                c.execute('INSERT INTO inventory_ledger(id,item,delta,reason,entitlement_id,at) VALUES(?,?,1,?,?,?)',(uid(),item,'ADMIN_ADJUST',ent_id,at))
+            for item in [x for x in given_after if x not in given_before]:
+                c.execute('INSERT INTO inventory_ledger(id,item,delta,reason,entitlement_id,at) VALUES(?,?,-1,?,?,?)',(uid(),item,'ADMIN_ADJUST',ent_id,at))
         claimed_at=(e['claimed_at'] if e and e['status']=='CLAIMED' else at) if kind and status=='CLAIMED' else None
         if kind is None:
             if e: c.execute('DELETE FROM entitlements WHERE id=?',(e['id'],))
@@ -726,7 +720,8 @@ def delete_submission(token,submission_id,payload):
     with db.transaction(write=True) as c:
         require_admin(c,token);sub,e=admin_submission(c,submission_id)
         if e and e['status']=='CLAIMED' and return_stock and sub['day_no']!=TEST_DAY:
-            c.execute('INSERT INTO inventory_ledger(id,item,delta,reason,entitlement_id,at) VALUES(?,?,1,?,?,?)',(uid(),e['choice'],'ADMIN_ADJUST',e['id'],stamp()))
+            for item in handed(e['kind'],e['choice']):
+                c.execute('INSERT INTO inventory_ledger(id,item,delta,reason,entitlement_id,at) VALUES(?,?,1,?,?,?)',(uid(),item,'ADMIN_ADJUST',e['id'],stamp()))
         if e: c.execute('DELETE FROM entitlements WHERE id=?',(e['id'],))
         c.execute('DELETE FROM submissions WHERE id=?',(submission_id,))
         # The try is given back; remaining tries are renumbered 1..n (ascending, so the unique key never collides).

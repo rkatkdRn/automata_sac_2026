@@ -83,9 +83,9 @@ def test_same_id_and_name_continue_on_another_device(booth):
     # 학번 without the hyphen and the name with stray spaces still match; the typed nickname is ignored
     second = ok(join_student(b, student_id="00000", name=" 홍 길동 ", nickname="아무거나"))
     assert second["participant_id"] == first["participant_id"]
-    assert second["nickname"] == "번개전술" and second["attempts_left"] == 2
-    assert ok(booth.submit(b))["attempt_no"] == 2
-    assert ok(a.get("/api/state"))["attempts_left"] == 1
+    assert second["nickname"] == "번개전술" and second["attempts_left"] == 0
+    error(booth.submit(b), "LIMIT_REACHED")
+    assert ok(a.get("/api/state"))["attempts_left"] == 0
 
 
 def test_different_name_cannot_take_over_a_student_id(booth):
@@ -175,7 +175,7 @@ def test_earlier_google_student_continues_with_id_and_name(booth):
     ok(old.post("/api/me/nickname", json={"nickname": "번개전술"}))
     ok(booth.submit(old))
     session = ok(join_student(booth.client(), name="홍길동", nickname="무시됨"))
-    assert session["participant_id"] == pid and session["nickname"] == "번개전술" and session["attempts_left"] == 2
+    assert session["participant_id"] == pid and session["nickname"] == "번개전술" and session["attempts_left"] == 0
     # one who never chose a nickname gets the one typed into the form
     _, other = legacy_google_student(booth, student_id="11-111", name="김철수")
     session = ok(join_student(booth.client(), student_id="11111", name="김철수", nickname="새별명"))
@@ -185,6 +185,7 @@ def test_earlier_google_student_continues_with_id_and_name(booth):
 
 def test_legacy_migration_preserves_attempts_rewards_and_revokes_old_cookie(booth):
     from server import db
+    booth.tries(3)
     booth.open()
     legacy = booth.guest("예전공개별명")
     participant_id = ok(legacy.get("/api/state"))["participant_id"]
@@ -260,7 +261,7 @@ def test_guest_reentry_cannot_reset_attempts_or_extend_session(booth):
     booth.clock[0] += timedelta(hours=1)
     result = ok(guest.post("/api/session", json={"kind": "GUEST", "nickname": "새로운별명", "consent": True}))
     assert result["participant_id"] == pid
-    assert result["attempts_left"] == 2
+    assert result["attempts_left"] == 0
     assert result["nickname"] == "원래손님"
     with db.transaction() as c:
         assert c.scalar("SELECT COUNT(*) FROM participants") == 1
