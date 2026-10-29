@@ -532,8 +532,6 @@ ADMIN_PIN=여기에_직접_정한_긴_비밀번호
 DB_PATH=data/rehearsal.db
 PORT=8000
 PRIVACY_CONTACT=Automata 운영 담당자에게 문의
-# 학생 로그인용 Web Client ID (설정법: docs/GOOGLE_LOGIN.md)
-GOOGLE_CLIENT_ID=
 </code></pre>
 <p>로컬 SQLite로 실행할 때 <code>DATABASE_URL</code>과 <code>DATABASE_URL_UNPOOLED</code>는 비워 두세요. 실제 행사는 <code>DB_PATH=data/blotto.db</code>, 개발은 <code>data/dev.db</code>, 리허설은 <code>data/rehearsal.db</code>처럼 분리합니다. 환경 변수로 이미 설정한 값은 <code>.env</code>보다 우선합니다.</p>
 <pre><code class="language-powershell">.\.venv\Scripts\python.exe scripts/run.py

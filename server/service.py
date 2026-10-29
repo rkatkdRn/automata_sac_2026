@@ -12,15 +12,14 @@ import time
 import uuid
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from . import db, engine, google_auth
+from . import db, engine
 
 ITEMS = ('MYCHEW', 'SESAME', 'ACE')
 COOKIE = 'blotto_session'
 ADMIN_COOKIE = 'blotto_admin'
-GOOGLE_CHALLENGE_COOKIE = 'blotto_google_challenge'
-SCHOOL_DOMAIN = 'ksa.hs.kr'
 GUEST_SESSION_HOURS = 12
-SCHOOL_CONSENT_VERSION = '2026-10-school-google-v2'
+STUDENT_SESSION_DAYS = 30
+CONSENT_VERSION = '2026-10-student-id-v3'
 TEST_DAY = db.TEST_DAY
 REAL_DAYS = (1, 2, 3)
 
@@ -70,7 +69,7 @@ def participant(c, token, required=True):
             FROM sessions s JOIN participants p ON p.id=s.participant_id
             LEFT JOIN school_identities i ON i.participant_id=p.id
             WHERE s.token_hash=? AND s.expires_at>? AND (
-                (p.kind='STUDENT' AND s.role='SCHOOL' AND i.google_sub IS NOT NULL) OR
+                (p.kind='STUDENT' AND s.role IN ('STUDENT','SCHOOL')) OR
                 (p.kind='GUEST' AND s.role IN ('GUEST','PLAYER') AND s.created_at>?)
             )""",(digest(token),stamp(),(now()-timedelta(hours=GUEST_SESSION_HOURS)).isoformat()))
     if required: need(row is not None,'UNAUTHORIZED','다시 로그인해 주세요.',401)
@@ -167,17 +166,31 @@ def state_in(c, token=None):
     return {'day_no':day['day_no'],'booth_state':booth,'open_now':bool(booth=='OPEN' and within and not purged),
         'next_open':next_open,'attempts_left':max(0,3-count),'mychew_left':max(0,day['mychew_cap_cum']-counters(c,is_test(day))['mychew_used']),'test_mode':is_test(day),
         'participant_id':person['id'] if person else None,'nickname':display_name(person) if person else None,
-        'kind':person['kind'] if person else None,'needs_nickname':needs_nickname(person),'auth_method':('GOOGLE' if person['kind']=='STUDENT' else 'GUEST') if person else None,
+        'kind':person['kind'] if person else None,'needs_nickname':needs_nickname(person),'auth_method':('STUDENT_ID' if person['kind']=='STUDENT' else 'GUEST') if person else None,
         'server_time':stamp(),'privacy_contact':os.getenv('PRIVACY_CONTACT','Automata 부스 운영진'),
         'cloud_mode':bool(os.getenv('DATABASE_URL')),'purged':purged,'threshold_bp':threshold(c,day['day_no']),'pass_mode':(pass_rule(c,day['day_no']) or (None,))[0]}
 
 def state(token=None):
     with db.transaction() as c: return state_in(c,token)
 
+def valid_student_id(value):
+    match=re.fullmatch(r'([0-9]{2})-?([0-9]{3})',value.strip()) if isinstance(value,str) else None
+    need(match is not None,'INVALID_STUDENT_ID','학번은 00-000 형식으로 입력해 주세요.',400)
+    return match.group(1)+'-'+match.group(2)
+
+def valid_real_name(value):
+    name=' '.join(value.split()) if isinstance(value,str) else ''
+    need(2<=len(name)<=30 and not any(ord(ch)<32 for ch in name) and not re.search(r'[<>@0-9]',name),'INVALID_NAME','이름을 2~30자로 정확히 입력해 주세요.',400)
+    return name
+
+def same_name(a, b):
+    # spacing and letter case never decide who someone is: '홍 길동' is '홍길동'
+    return ''.join((a or '').split()).casefold()==''.join((b or '').split()).casefold()
+
 def login(payload, old_token=None):
     need(payload.get('consent') is True,'CONSENT_REQUIRED','개인정보 수집·이용 동의가 필요해요.',400)
     kind=payload.get('kind'); nickname=payload.get('nickname','')
-    need(kind!='STUDENT','GOOGLE_LOGIN_REQUIRED','재학생은 학교 Google 계정으로 로그인해 주세요.',401)
+    if kind=='STUDENT': return student_login(payload, old_token)
     need(kind=='GUEST','INVALID_INPUT','외부인 임시 참가를 선택해 주세요.',400)
     nickname=valid_nickname(nickname)
     with db.transaction(write=True) as c:
@@ -189,7 +202,7 @@ def login(payload, old_token=None):
         if not existing_guest:
             need(c.one('SELECT id FROM participants WHERE nickname=?',(nickname,)) is None,'NICKNAME_TAKEN','이미 쓰고 있는 닉네임이에요.')
             person={'id':uid(),'kind':'GUEST','nickname':nickname,'name_hidden':0}
-            c.execute('INSERT INTO participants(id,kind,nickname,consent_at,consent_version) VALUES(?,?,?,?,?)',(person['id'],'GUEST',nickname,stamp(),SCHOOL_CONSENT_VERSION))
+            c.execute('INSERT INTO participants(id,kind,nickname,consent_at,consent_version) VALUES(?,?,?,?,?)',(person['id'],'GUEST',nickname,stamp(),CONSENT_VERSION))
         token=secrets.token_urlsafe(32)
         # Keep an existing guest's original expiry; repeated login does not turn
         # a temporary account into an indefinitely extended session.
@@ -207,100 +220,41 @@ def session_public(c,person):
     day=get_day(c)
     attempts=c.scalar('SELECT COUNT(*) FROM submissions WHERE participant_id=? AND day_no=?',(person['id'],day['day_no']))
     return {'participant_id':person['id'],'nickname':display_name(person),'kind':person['kind'],'needs_nickname':needs_nickname(person),
-            'auth_method':'GOOGLE' if person['kind']=='STUDENT' else 'GUEST','attempts_left':max(0,3-attempts)}
+            'auth_method':'STUDENT_ID' if person['kind']=='STUDENT' else 'GUEST','attempts_left':max(0,3-attempts)}
 
 
-def google_config():
-    client_id=os.getenv('GOOGLE_CLIENT_ID','').strip()
-    configured=bool(re.fullmatch(r'[A-Za-z0-9_-]+\.apps\.googleusercontent\.com',client_id))
-    return {'google_client_id':client_id if configured else None,'school_domain':SCHOOL_DOMAIN,
-            'configured':configured,'guest_session_hours':GUEST_SESSION_HOURS}
-
-
-def require_google_config():
-    cfg=google_config()
-    need(cfg['configured'],'GOOGLE_AUTH_NOT_CONFIGURED','학교 Google 로그인 설정이 아직 완료되지 않았어요. 운영진에게 문의해 주세요.',503)
-    return cfg['google_client_id']
-
-
-def google_challenge(payload,old_cookie=None):
-    require_google_config()
-    need(payload.get('consent') is True,'CONSENT_REQUIRED','학교 계정 정보 이용과 닉네임 공개에 동의해 주세요.',400)
-    cookie=secrets.token_urlsafe(32);nonce=secrets.token_urlsafe(32)
+# In-school students sign in with 학번, 이름 and a nickname. The same 학번 and 이름 continue the
+# same record on any device; a different name never takes over a 학번 (staff sort that out).
+def student_login(payload, old_token=None):
+    student_id=valid_student_id(payload.get('student_id'))
+    name=valid_real_name(payload.get('name'))
     with db.transaction(write=True) as c:
         need(db.config(c,'purged')!='true','EVENT_ENDED','개인정보 파기가 완료되어 참여가 종료됐어요.')
-        c.execute('DELETE FROM google_login_challenges WHERE expires_at<=?',(stamp(),))
-        if old_cookie:c.execute('DELETE FROM google_login_challenges WHERE cookie_hash=?',(digest(old_cookie),))
-        c.execute('INSERT INTO google_login_challenges(cookie_hash,nonce_hash,expires_at,created_at) VALUES(?,?,?,?)',
-                  (digest(cookie),digest(nonce),(now()+timedelta(minutes=10)).isoformat(),stamp()))
-    return {'nonce':nonce},cookie
-
-
-def google_login(payload,challenge_cookie,old_token=None):
-    audience=require_google_config()
-    need(payload.get('consent') is True,'CONSENT_REQUIRED','학교 계정 정보 이용과 닉네임 공개에 동의해 주세요.',400)
-    credential=payload.get('credential')
-    need(isinstance(credential,str) and 1<=len(credential)<=16000,'GOOGLE_AUTH_INVALID','Google 로그인 정보를 다시 받아 주세요.',401)
-    need(isinstance(challenge_cookie,str) and 20<=len(challenge_cookie)<=200,'AUTH_CHALLENGE_EXPIRED','로그인 준비 시간이 지났어요. 학교 로그인 버튼을 다시 눌러 주세요.',401)
-    # Consume before the network call in a separately committed transaction.
-    # Neither verification failure nor concurrent requests can reuse a nonce.
-    with db.transaction(write=True) as c:
-        challenge=c.one('SELECT nonce_hash,expires_at FROM google_login_challenges WHERE cookie_hash=?',(digest(challenge_cookie),))
-        c.execute('DELETE FROM google_login_challenges WHERE cookie_hash=? OR expires_at<=?',(digest(challenge_cookie),stamp()))
-    need(challenge is not None and challenge['expires_at']>stamp(),'AUTH_CHALLENGE_EXPIRED','로그인 준비 시간이 지났어요. 학교 로그인 버튼을 다시 눌러 주세요.',401)
-    try:
-        claims=google_auth.verify_credential(credential,audience)
-    except google_auth.GoogleVerificationError as exc:
-        if exc.unavailable:raise GameError('GOOGLE_AUTH_UNAVAILABLE','Google 계정 확인에 연결하지 못했어요. 다시 시도해 주세요.',503) from None
-        raise GameError('GOOGLE_AUTH_INVALID','Google 로그인 정보를 확인할 수 없어요. 다시 로그인해 주세요.',401) from None
-    valid=claims.get('aud')==audience and claims.get('iss') in ('accounts.google.com','https://accounts.google.com')
-    tick=time.time();expiry=claims.get('exp');issued=claims.get('iat')
-    valid=valid and type(expiry) in (int,float) and expiry>tick and type(issued) in (int,float) and issued<=tick
-    nonce=claims.get('nonce')
-    valid=valid and isinstance(nonce,str) and hmac.compare_digest(digest(nonce),challenge['nonce_hash'])
-    need(valid,'GOOGLE_AUTH_INVALID','Google 로그인 정보를 확인할 수 없어요. 다시 로그인해 주세요.',401)
-    email=claims.get('email');subject=claims.get('sub');name=claims.get('name')
-    need(claims.get('email_verified') is True and claims.get('hd')==SCHOOL_DOMAIN and isinstance(email,str)
-         and re.fullmatch(r'[0-9]{2}-[0-9]{3}@ksa\.hs\.kr',email.lower()) is not None,
-         'SCHOOL_ACCOUNT_REQUIRED','00-000@ksa.hs.kr 형식의 학교 Google 계정으로 로그인해 주세요.',403)
-    need(isinstance(subject,str) and 1<=len(subject)<=255 and isinstance(name,str) and 1<=len(name.strip())<=100
-         and not any(ord(ch)<32 for ch in name) and not re.search(r'[<>]',name),
-         'GOOGLE_AUTH_INVALID','학교 Google 계정에 이름이 등록되어 있는지 확인해 주세요.',401)
-    email=email.lower();name=name.strip();student_id=email.split('@',1)[0]
-    with db.transaction(write=True) as c:
-        need(db.config(c,'purged')!='true','EVENT_ENDED','개인정보 파기가 완료되어 참여가 종료됐어요.')
-        identity=c.one('SELECT * FROM school_identities WHERE google_sub=?',(subject,))
-        migrated=False
-        if identity:
-            need(identity['school_email']==email,'ACCOUNT_CONFLICT','학교 계정 정보가 변경됐어요. 운영진에게 문의해 주세요.')
-            person=c.one('SELECT * FROM participants WHERE id=?',(identity['participant_id'],))
-            need(person is not None and person['kind']=='STUDENT' and person['student_id']==student_id,'ACCOUNT_CONFLICT','학교 계정 연결을 운영진에게 확인해 주세요.')
-        else:
-            need(c.one('SELECT google_sub FROM school_identities WHERE school_email=?',(email,)) is None,'ACCOUNT_CONFLICT','학교 계정 연결을 운영진에게 확인해 주세요.')
-            person=c.one('SELECT * FROM participants WHERE student_id=?',(student_id,))
-            if person:
-                need(person['kind']=='STUDENT' and c.one('SELECT google_sub FROM school_identities WHERE participant_id=?',(person['id'],)) is None,
-                     'ACCOUNT_CONFLICT','학교 계정 연결을 운영진에게 확인해 주세요.')
-                migrated=True
+        person=c.one('SELECT * FROM participants WHERE student_id=?',(student_id,))
+        returning=person is not None
+        if returning:
+            need(person['kind']=='STUDENT' and same_name(person['real_name'],name),'STUDENT_ID_CONFLICT','학번이 다른 이름으로 등록되어 있어요. 스태프에게 말씀해 주세요.')
+        # a returning student keeps the nickname already on the boards; the typed one is ignored
+        if not returning or not person.get('nickname_chosen'):
+            nickname=valid_nickname(payload.get('nickname',''))
+            need(c.one('SELECT id FROM participants WHERE nickname=? AND id!=?',(nickname,person['id'] if returning else '')) is None,'NICKNAME_TAKEN','이미 쓰고 있는 닉네임이에요.')
+            if returning:
+                c.execute('UPDATE participants SET nickname=?,nickname_chosen=1 WHERE id=?',(nickname,person['id']))
+                person.update(nickname=nickname,nickname_chosen=1)
+                clear_caches(c)
             else:
-                person={'id':uid(),'kind':'STUDENT','student_id':student_id,'nickname':'school-'+uid(),'name_hidden':0}
-                c.execute('INSERT INTO participants(id,kind,student_id,real_name,nickname,consent_at,consent_version) VALUES(?,?,?,?,?,?,?)',
-                          (person['id'],'STUDENT',student_id,name,person['nickname'],stamp(),SCHOOL_CONSENT_VERSION))
-            c.execute('INSERT INTO school_identities(google_sub,participant_id,school_email,verified_at) VALUES(?,?,?,?)',
-                      (subject,person['id'],email,stamp()))
-        c.execute('UPDATE participants SET real_name=?,consent_at=?,consent_version=? WHERE id=?',(name,stamp(),SCHOOL_CONSENT_VERSION,person['id']))
-        c.execute('UPDATE school_identities SET verified_at=? WHERE google_sub=?',(stamp(),subject))
-        # Every unverified legacy token is rejected by participant() immediately;
-        # remove those rows too when this owner first claims the account.
-        c.execute("DELETE FROM sessions WHERE participant_id=? AND role!='SCHOOL'",(person['id'],))
+                person={'id':uid(),'kind':'STUDENT','student_id':student_id,'real_name':name,'nickname':nickname,'nickname_chosen':1,'name_hidden':0}
+                c.execute('INSERT INTO participants(id,kind,student_id,real_name,nickname,nickname_chosen,consent_at,consent_version) VALUES(?,?,?,?,?,?,?,?)',
+                          (person['id'],'STUDENT',student_id,name,nickname,1,stamp(),CONSENT_VERSION))
+        if returning:
+            c.execute('UPDATE participants SET consent_at=?,consent_version=? WHERE id=?',(stamp(),CONSENT_VERSION,person['id']))
         if old_token:c.execute('DELETE FROM sessions WHERE token_hash=?',(digest(old_token),))
         token=secrets.token_urlsafe(32)
         c.execute('INSERT INTO sessions(token_hash,participant_id,role,expires_at,created_at) VALUES(?,?,?,?,?)',
-                  (digest(token),person['id'],'SCHOOL',(now()+timedelta(days=30)).isoformat(),stamp()))
-        person.update(real_name=name,verified_school_subject=subject)
-        clear_caches(c)
-        audit(c,'SCHOOL_LOGIN',details={'participant_id':person['id'],'legacy_linked':migrated});db.bump(c)
+                  (digest(token),person['id'],'STUDENT',(now()+timedelta(days=STUDENT_SESSION_DAYS)).isoformat(),stamp()))
+        audit(c,'STUDENT_LOGIN',details={'participant_id':person['id'],'returning':returning});db.bump(c)
         return session_public(c,person),token
+
 
 def set_nickname(token,payload):
     nickname=valid_nickname(payload.get('nickname',''))
@@ -316,11 +270,10 @@ def set_nickname(token,payload):
         clear_caches(c);audit(c,'NICKNAME_SET',details={'participant_id':me['id']});db.bump(c)
         return session_public(c,me)
 
-def logout(token,challenge_cookie=None):
-    if token or challenge_cookie:
+def logout(token):
+    if token:
         with db.transaction(write=True) as c:
-            if token:c.execute('DELETE FROM sessions WHERE token_hash=?',(digest(token),))
-            if challenge_cookie:c.execute('DELETE FROM google_login_challenges WHERE cookie_hash=?',(digest(challenge_cookie),))
+            c.execute('DELETE FROM sessions WHERE token_hash=?',(digest(token),))
     return {'ok':True}
 
 def admin_login(pin, ip):
@@ -790,7 +743,7 @@ def participants(token):
         rows=c.all('SELECT p.id,p.nickname,p.kind,p.name_hidden,p.real_name,p.nickname_chosen,i.google_sub AS verified_school_subject,COUNT(s.id) AS submission_count FROM participants p LEFT JOIN submissions s ON s.participant_id=p.id LEFT JOIN school_identities i ON i.participant_id=p.id GROUP BY p.id,p.nickname,p.kind,p.name_hidden,p.real_name,p.nickname_chosen,i.google_sub ORDER BY p.nickname')
         for r in rows:
             r['nickname']=display_name(r);r['name_hidden']=bool(r['name_hidden'])
-            r['auth_method']='GOOGLE' if r.get('verified_school_subject') else ('GUEST' if r['kind']=='GUEST' else 'LEGACY')
+            r['auth_method']='STUDENT_ID' if r['kind']=='STUDENT' else 'GUEST'
             r.pop('real_name',None);r.pop('verified_school_subject',None);r.pop('nickname_chosen',None)
         return {'items':rows}
 

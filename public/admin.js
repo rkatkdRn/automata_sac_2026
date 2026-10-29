@@ -27,7 +27,7 @@ async function request(path, body, options={}) {
 }
 
 export async function mountAdmin(container) {
-  if(!document.querySelector('link[data-blotto-admin]')){const link=document.createElement('link');link.rel='stylesheet';link.href='/admin.css?v=nickname-20261029-r8';link.dataset.blottoAdmin='1';document.head.append(link);}
+  if(!document.querySelector('link[data-blotto-admin]')){const link=document.createElement('link');link.rel='stylesheet';link.href='/admin.css?v=student-id-20261029-r9';link.dataset.blottoAdmin='1';document.head.append(link);}
   document.title='운영 콘솔 · Colonel Blotto';
   const initial=location.hash.slice(1);
   const s={section:TITLES[initial]?initial:'overview',dashboard:null,extra:{},pending:false,loadId:0,claimStatus:'ALL',claimSearch:'',participantSearch:'',subDay:'',subSearch:'',subSort:'TIME',suggested:null,thresholdSource:'MANUAL',timer:null,lastUpdated:null};
@@ -120,7 +120,7 @@ export async function mountAdmin(container) {
         if(ok){const v=ok.values;await mutation(`/api/admin/submissions/${encodeURIComponent(r.id)}/snack`,{kind:v.kind||null,choice:v.choice||null,status:v.status,reason:ok.reason,return_stock:ok.return_stock},'간식 상태를 수정했어요.');}return;}
       if(action==='hide'){const ok=await ask({title:'표시 이름을 가릴까요?',body:'스코어보드와 명예의 전당 등 공개 화면에서 이 표시 이름을 가립니다.',reason:true,button:'표시 이름 가리기'});if(ok)await mutation(`/api/admin/participants/${encodeURIComponent(button.dataset.id)}/hide`,{reason:ok.reason},'표시 이름을 가렸어요.');return;}
       if(action==='freeze'){const scope=button.dataset.scope;const label=scope==='OVERALL'?'종합':`${scope.slice(-1)}일차`;const ok=await ask({title:`${label} 순위를 확정할까요?`,body:'현재 누적 풀로 다시 계산한 상위 10명을 고정합니다. 이미 확정된 순위가 있다면 기존 결과가 유지됩니다.',button:'순위 확정'});if(ok)await mutation('/api/admin/freeze',{scope},`${label} 명예의 전당을 확정했어요.`);return;}
-      if(action==='purge'){const ok=await ask({title:'개인정보를 영구 파기할까요?',body:'학교 이메일·학번·이름·Google 계정 식별자·로그인 세션을 삭제하고 표시 이름을 익명화합니다. 모든 참가자 로그인은 종료됩니다. 먼저 운영을 마감하세요. 별도 백업 사본도 직접 삭제해야 합니다.',reason:true,confirmText:'PURGE',danger:true,button:'영구 파기'});if(ok)await mutation('/api/admin/purge',{confirm:'PURGE',reason:ok.reason},'개인정보를 파기했어요. 외부에 보관한 사본도 삭제해 주세요.');return;}
+      if(action==='purge'){const ok=await ask({title:'개인정보를 영구 파기할까요?',body:'학번·이름·로그인 세션(이전 Google 로그인 기록 포함)을 삭제하고 표시 이름을 익명화합니다. 모든 참가자 로그인은 종료됩니다. 먼저 운영을 마감하세요. 별도 백업 사본도 직접 삭제해야 합니다.',reason:true,confirmText:'PURGE',danger:true,button:'영구 파기'});if(ok)await mutation('/api/admin/purge',{confirm:'PURGE',reason:ok.reason},'개인정보를 파기했어요. 외부에 보관한 사본도 삭제해 주세요.');return;}
       if(action==='clear-test'){const ok=await ask({title:'테스트 기록을 삭제할까요?',body:'테스트 모드의 제출·수령권·임계값과 테스트에서만 참여한 외부인 계정을 지웁니다. 시드와 1~3일차 기록은 그대로입니다.',danger:true,button:'테스트 기록 삭제'});if(ok)await mutation('/api/admin/test/clear',{},'테스트 기록을 삭제했어요.');return;}
       if(action==='reset'){const ok=await ask({title:'데이터를 초기화할까요?',body:'모든 참가자·전략·수령권·운영 기록을 지웁니다. 어느 운영일도 개장하지 않았을 때만 가능합니다. 필요한 시드와 백업을 먼저 내보내세요.',reason:true,confirmText:'RESET',danger:true,button:'전체 초기화'});if(ok)await mutation('/api/admin/reset',{confirm:'RESET',reason:ok.reason},'데이터를 초기화했어요.');return;}
       const paths={'seed-export':['/api/admin/seeds/export','blotto-seeds.json'],export:['/api/admin/export','blotto-records.zip'],'qr-download':['/api/admin/qr','blotto-qr.svg']};

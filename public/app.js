@@ -64,83 +64,36 @@ function gameFrame(content){return `<div class="game-layout"><aside class="desk-
 // The test operating day has no hall of fame and is labelled instead of numbered.
 const dayLabel=d=>d.test_mode?'🧪 테스트 모드':`${d.day_no||1}일차`;
 function topLine(){return `<div class="topline"><span>${dayLabel(state)} · <b class="topline-name">${escapeHTML(state.needs_nickname?'지휘관':state.nickname||'지휘관')}</b></span><button class="text-btn" id="logout">다른 사람으로 시작</button></div>`;}
-function bindLogout(){const el=$('#logout');if(el)el.onclick=async()=>{if(!await confirmDialog('다른 사람으로 시작할까요?',state.kind==='GUEST'?'외부인 임시 로그인은 로그아웃 후 닉네임만으로 복구할 수 없어요. 계속할까요?':'같은 학교 Google 계정으로 다시 로그인하면 기존 기록과 남은 횟수가 이어집니다. 공용 기기에서는 Google 계정에서도 별도로 로그아웃해 주세요.','로그아웃'))return;try{await api('/api/session/logout',{method:'POST',body:{}});window.google?.accounts?.id?.disableAutoSelect();storage.remove('draft');storage.remove('pending');currentResult=null;historyItems=[];state={...state,participant_id:null,nickname:null};goto('/');renderLogin();}catch(e){showToast(e.message,true);}};}
+function bindLogout(){const el=$('#logout');if(el)el.onclick=async()=>{if(!await confirmDialog('다른 사람으로 시작할까요?',state.kind==='GUEST'?'외부인 임시 로그인은 로그아웃 후 닉네임만으로 복구할 수 없어요. 계속할까요?':'같은 학번과 이름으로 다시 들어오면 기존 기록과 남은 횟수가 이어집니다.','로그아웃'))return;try{await api('/api/session/logout',{method:'POST',body:{}});storage.remove('draft');storage.remove('pending');currentResult=null;historyItems=[];state={...state,participant_id:null,nickname:null};goto('/');renderLogin();}catch(e){showToast(e.message,true);}};}
 async function privacyDialog(){
   try { state = await api('/api/state'); } catch {}
-  const modal=$('#modal');modal.innerHTML=`<h2>개인정보 처리 안내</h2><p>작전 현황과 명예의 전당에는 참가자가 정한 닉네임만 공개합니다. 재학생은 학교 계정 인증 후 닉네임을 정합니다. 닉네임에 실명이나 연락처를 쓰지 마세요.</p><dl class="privacy-list"><dt>수집하는 정보</dt><dd>재학생의 학교 이메일·학번·Google 계정 식별자·계정 등록 이름, 참가자의 닉네임, 로그인 세션 토큰 해시, 동의 시각, 제출 전략과 시각. Google 비밀번호와 이메일 내용은 받지 않습니다.</dd><dt>이용 목적</dt><dd>학교 계정 본인 확인, 게임 진행, 하루 3회 제한, 간식 지급 판정, 공개 순위에 닉네임 표시.</dd><dt>보유 및 파기</dt><dd>행사 종료 후 7일 이내 학교 이메일·학번·이름·Google 계정 식별자·닉네임·로그인 세션을 서버와 백업에서 삭제합니다. 이후 개인을 알 수 없는 전략 기록만 남깁니다.</dd><dt>로그인 유지</dt><dd>학교 계정 로그인은 최대 30일, 외부인 임시 로그인은 최대 12시간 유지됩니다. 외부인은 로그아웃하거나 세션이 끝나면 닉네임만으로 기존 계정을 복구할 수 없습니다.</dd><dt>서비스 운영 환경</dt><dd>${state.cloud_mode?'이 서비스는 Vercel의 웹·API 호스팅과 운영진이 설정한 외부 데이터베이스를 사용합니다. 클라우드 처리 위치와 사업자는 운영진에게 확인할 수 있습니다.':'이 서비스는 운영진이 관리하는 서버에서 실행됩니다. 실제 보관 위치와 백업 관리 방법은 운영진에게 문의해 주세요.'}</dd><dt>동의 거부 및 어린이 참여</dt><dd>동의하지 않을 수 있으나 게임 참여는 어렵습니다. 만 14세 미만은 보호자와 함께, 보호자 동의 후 참여해 주세요.</dd><dt>문의</dt><dd>${escapeHTML(state.privacy_contact||'Automata 부스 운영진에게 문의해 주세요.')}</dd></dl><div class="dialog-actions"><a class="btn secondary" href="/privacy.html" target="_blank" rel="noopener">안내 페이지</a><button class="btn" id="close-privacy">확인했어요</button></div>`;modal.showModal();$('#close-privacy').onclick=()=>modal.close();}
+  const modal=$('#modal');modal.innerHTML=`<h2>개인정보 처리 안내</h2><p>작전 현황과 명예의 전당에는 참가자가 정한 닉네임만 공개합니다. 학번과 이름은 공개하지 않으며, 닉네임에 실명이나 연락처를 쓰지 마세요.</p><dl class="privacy-list"><dt>수집하는 정보</dt><dd>재학생의 학번·이름, 참가자의 닉네임, 로그인 세션 토큰 해시, 동의 시각, 제출 전략과 시각.</dd><dt>이용 목적</dt><dd>재학생 확인과 기록 이어가기, 게임 진행, 하루 3회 제한, 간식 지급 판정, 공개 순위에 닉네임 표시.</dd><dt>보유 및 파기</dt><dd>행사 종료 후 7일 이내 학번·이름·닉네임·로그인 세션을 서버와 백업에서 삭제합니다. 이후 개인을 알 수 없는 전략 기록만 남깁니다.</dd><dt>로그인 유지</dt><dd>재학생 로그인은 최대 30일, 외부인 임시 로그인은 최대 12시간 유지됩니다. 재학생은 같은 학번과 이름으로 다시 들어오면 기록이 이어지고, 외부인은 로그아웃하거나 세션이 끝나면 닉네임만으로 기존 계정을 복구할 수 없습니다.</dd><dt>서비스 운영 환경</dt><dd>${state.cloud_mode?'이 서비스는 Vercel의 웹·API 호스팅과 운영진이 설정한 외부 데이터베이스를 사용합니다. 클라우드 처리 위치와 사업자는 운영진에게 확인할 수 있습니다.':'이 서비스는 운영진이 관리하는 서버에서 실행됩니다. 실제 보관 위치와 백업 관리 방법은 운영진에게 문의해 주세요.'}</dd><dt>동의 거부 및 어린이 참여</dt><dd>동의하지 않을 수 있으나 게임 참여는 어렵습니다. 만 14세 미만은 보호자와 함께, 보호자 동의 후 참여해 주세요.</dd><dt>문의</dt><dd>${escapeHTML(state.privacy_contact||'Automata 부스 운영진에게 문의해 주세요.')}</dd></dl><div class="dialog-actions"><a class="btn secondary" href="/privacy.html" target="_blank" rel="noopener">안내 페이지</a><button class="btn" id="close-privacy">확인했어요</button></div>`;modal.showModal();$('#close-privacy').onclick=()=>modal.close();}
 function confirmDialog(title,message,yes='확인'){
   const modal=$('#modal');return new Promise(resolve=>{modal.innerHTML=`<h2>${escapeHTML(title)}</h2><p>${escapeHTML(message)}</p><div class="dialog-actions"><button class="btn secondary" data-no>다시 확인</button><button class="btn" data-yes>${escapeHTML(yes)}</button></div>`;let done=false;const finish=v=>{if(done)return;done=true;modal.close();resolve(v);};$('[data-no]',modal).onclick=()=>finish(false);$('[data-yes]',modal).onclick=()=>finish(true);modal.oncancel=()=>finish(false);modal.showModal();});}
-let googleScriptPromise;
 let loginEpoch=0;
-function loadGoogleIdentity(){
-  if(window.google?.accounts?.id)return Promise.resolve(window.google.accounts.id);
-  if(googleScriptPromise)return googleScriptPromise;
-  googleScriptPromise=new Promise((resolve,reject)=>{
-    const script=document.createElement('script');script.src='https://accounts.google.com/gsi/client';script.async=true;script.defer=true;
-    let settled=false;
-    const finish=(error)=>{if(settled)return;settled=true;clearTimeout(timer);script.onload=null;script.onerror=null;if(error){script.remove();googleScriptPromise=null;reject(error);}else resolve(window.google.accounts.id);};
-    const timer=setTimeout(()=>finish(new Error('Google 로그인 버튼을 불러오지 못했어요. 연결을 확인하고 다시 준비해 주세요.')),15000);
-    script.onload=()=>finish(window.google?.accounts?.id?null:new Error('Google 로그인 연결을 다시 확인해 주세요.'));
-    script.onerror=()=>finish(new Error('Google 로그인 연결이 차단됐어요. 기본 브라우저에서 열거나 연결을 확인해 주세요.'));
-    document.head.append(script);
-  });
-  return googleScriptPromise;
-}
 function renderLogin(){
   const epoch=++loginEpoch;currentView='login';
-  app.innerHTML=`<div class="arrival"><section class="hero"><div class="eyebrow">AUTOMATA STRATEGY LAB · 2026</div><h1>병사 <em>101명.</em><br>전선 <em>다섯 곳.</em><br>당신의 선택은?</h1><p class="hero-intro">정답은 없습니다. 서로를 이기는 전략만 있을 뿐.<br>다섯 개의 전선에 병력을 배치하고<br>나만의 승리 공식을 찾아보세요.</p><div class="battle-illustration">${flags()}<p class="illustration-note">ONE ARMY. FIVE FRONTS. COUNTLESS POSSIBILITIES.</p></div><ol class="rules-mini"><li><b>01</b> 각 전선에서 병력이 많으면 승리</li><li><b>02</b> 더 많은 전선을 가져오면 대결 승리</li><li><b>03</b> 하루 세 번의 도전 · 첫 제출로 간식 결정</li></ol></section><section class="join-panel"><div class="panel-top"><div><div class="eyebrow">ENLISTMENT / 참가 등록</div><h2>작전에 참가하세요</h2></div><img src="/assets/logo-emblem.svg" alt="" width="54" height="54"></div><div class="join-tabs" role="tablist" aria-label="참가자 구분"><button type="button" id="student-tab" class="active" role="tab" aria-selected="true" aria-controls="student-panel" data-kind="STUDENT">KSA 재학생</button><button type="button" id="guest-tab" role="tab" aria-selected="false" aria-controls="guest-panel" tabindex="-1" data-kind="GUEST">외부인</button></div><section id="student-panel" class="school-login" role="tabpanel" aria-labelledby="student-tab"><div class="school-login-note"><strong>학교 Google 계정으로 로그인</strong><p><span class="school-email-example">학번@ksa.hs.kr</span> 형식의 학교 계정을 선택해 주세요.</p><p>로그인 후 정하는 닉네임이 작전 현황과 명예의 전당에 표시됩니다.</p></div><label class="consent"><input type="checkbox" id="school-consent"><span>개인정보 수집·이용 및 닉네임의 공개 표시에 동의합니다. (필수)<br><button type="button" class="text-btn" data-privacy>처리 안내 보기</button></span></label><p id="google-status" class="hint" role="status" aria-live="polite">동의하면 Google 로그인 버튼이 나타나요.</p><div id="google-button" class="google-signin" hidden></div><p id="school-error" class="error-text" role="alert"></p><button type="button" id="google-retry" class="btn secondary full" hidden>로그인 다시 준비</button><p class="hint school-popup-help" hidden>로그인 창이 열리지 않으면 팝업을 허용해 주세요. 앱 안에서 열었다면 Safari 또는 Chrome으로 열어 주세요.</p><p class="join-fineprint">같은 학교 계정으로 다시 로그인하면<br>기존 기록과 남은 도전 횟수가 이어집니다.</p></section><section id="guest-panel" role="tabpanel" aria-labelledby="guest-tab" hidden><form class="join-form" id="join-form"><label class="field"><span>외부인 닉네임 <small class="muted">화면에 표시돼요</small></span><input name="nickname" autocomplete="off" minlength="2" maxlength="10" placeholder="2~10글자, 나만의 호출명" required></label><p class="hint">외부인은 닉네임으로 임시 참여해요. 실명·연락처는 사용하지 마세요.</p><label class="consent"><input type="checkbox" name="consent" required><span>개인정보 수집·이용에 동의합니다. (필수)<br><button type="button" class="text-btn" data-privacy>처리 안내 보기</button></span></label><p id="join-error" class="error-text" role="alert"></p><button type="submit" class="btn full" id="join-submit" disabled>외부인으로 시작하기 <span aria-hidden="true">→</span></button></form><p class="join-fineprint">임시 로그인은 최대 12시간 동안 유지돼요.<br>로그아웃하거나 세션이 끝나면 닉네임만으로 복구할 수 없어요.</p></section></section></div>`;
-  const panel=$('.join-panel'),form=$('#join-form'),consent=$('#school-consent'),googleBox=$('#google-button'),status=$('#google-status'),schoolError=$('#school-error'),retry=$('#google-retry');
-  let kind='STUDENT',busy=false,preparing=false,attempt=0,buttonReady=false,expiresAt=0,expiryTimer;
+  app.innerHTML=`<div class="arrival"><section class="hero"><div class="eyebrow">AUTOMATA STRATEGY LAB · 2026</div><h1>병사 <em>101명.</em><br>전선 <em>다섯 곳.</em><br>당신의 선택은?</h1><p class="hero-intro">정답은 없습니다. 서로를 이기는 전략만 있을 뿐.<br>다섯 개의 전선에 병력을 배치하고<br>나만의 승리 공식을 찾아보세요.</p><div class="battle-illustration">${flags()}<p class="illustration-note">ONE ARMY. FIVE FRONTS. COUNTLESS POSSIBILITIES.</p></div><ol class="rules-mini"><li><b>01</b> 각 전선에서 병력이 많으면 승리</li><li><b>02</b> 더 많은 전선을 가져오면 대결 승리</li><li><b>03</b> 하루 세 번의 도전 · 첫 제출로 간식 결정</li></ol></section><section class="join-panel"><div class="panel-top"><div><div class="eyebrow">ENLISTMENT / 참가 등록</div><h2>작전에 참가하세요</h2></div><img src="/assets/logo-emblem.svg" alt="" width="54" height="54"></div><div class="join-tabs" role="tablist" aria-label="참가자 구분"><button type="button" id="student-tab" class="active" role="tab" aria-selected="true" aria-controls="student-panel" data-kind="STUDENT">KSA 재학생</button><button type="button" id="guest-tab" role="tab" aria-selected="false" aria-controls="guest-panel" tabindex="-1" data-kind="GUEST">외부인</button></div><section id="student-panel" role="tabpanel" aria-labelledby="student-tab"><form class="join-form" id="student-form"><label class="field"><span>학번</span><input name="student_id" autocomplete="off" inputmode="numeric" pattern="[0-9]{2}-?[0-9]{3}" maxlength="6" placeholder="예: 26-001" required></label><label class="field"><span>이름</span><input name="name" autocomplete="off" minlength="2" maxlength="30" placeholder="실명" required></label><label class="field"><span>닉네임 <small class="muted">화면에 표시돼요</small></span><input name="nickname" autocomplete="off" minlength="2" maxlength="10" placeholder="2~10글자, 나만의 호출명" required></label><p class="hint">작전 현황과 명예의 전당에는 닉네임만 표시돼요. 학번과 이름은 공개되지 않아요.</p><label class="consent"><input type="checkbox" name="consent" required><span>개인정보(학번·이름) 수집·이용 및 닉네임 공개에 동의합니다. (필수)<br><button type="button" class="text-btn" data-privacy>처리 안내 보기</button></span></label><p id="student-error" class="error-text" role="alert"></p><button type="submit" class="btn full" id="student-submit" disabled>재학생으로 시작하기 <span aria-hidden="true">→</span></button></form><p class="join-fineprint">같은 학번과 이름으로 다시 들어오면<br>기존 닉네임과 기록, 남은 도전 횟수가 이어집니다.</p></section><section id="guest-panel" role="tabpanel" aria-labelledby="guest-tab" hidden><form class="join-form" id="join-form"><label class="field"><span>외부인 닉네임 <small class="muted">화면에 표시돼요</small></span><input name="nickname" autocomplete="off" minlength="2" maxlength="10" placeholder="2~10글자, 나만의 호출명" required></label><p class="hint">외부인은 닉네임으로 임시 참여해요. 실명·연락처는 사용하지 마세요.</p><label class="consent"><input type="checkbox" name="consent" required><span>개인정보 수집·이용에 동의합니다. (필수)<br><button type="button" class="text-btn" data-privacy>처리 안내 보기</button></span></label><p id="join-error" class="error-text" role="alert"></p><button type="submit" class="btn full" id="join-submit" disabled>외부인으로 시작하기 <span aria-hidden="true">→</span></button></form><p class="join-fineprint">임시 로그인은 최대 12시간 동안 유지돼요.<br>로그아웃하거나 세션이 끝나면 닉네임만으로 복구할 수 없어요.</p></section></section></div>`;
+  const panel=$('.join-panel'),forms=$$('form',panel);
+  let kind='STUDENT',busy=false;
   const active=()=>epoch===loginEpoch&&currentView==='login'&&panel.isConnected;
-  const valid=()=>{if(active())$('#join-submit').disabled=busy||!form.checkValidity();};
-  const lock=value=>{busy=value;if(!active())return;$$('[data-kind]',panel).forEach(b=>b.disabled=value);consent.disabled=value;$$('input',form).forEach(i=>i.disabled=value);retry.disabled=value;googleBox.hidden=value||kind!=='STUDENT'||!consent.checked||!buttonReady;valid();};
+  const valid=()=>{if(active())forms.forEach(f=>{$('[type=submit]',f).disabled=busy||!f.checkValidity();});};
+  const lock=value=>{busy=value;if(!active())return;$$('[data-kind]',panel).forEach(b=>b.disabled=value);$$('input',panel).forEach(i=>i.disabled=value);valid();};
   const loginError=err=>err.code==='NETWORK'?'로그인 응답을 확인하지 못했어요. 연결을 확인한 뒤 다시 시도해 주세요.':err.message;
-  const complete=async()=>{storage.remove('draft');storage.remove('pending');currentResult=null;state=await api('/api/state');historyItems=(await api('/api/me/submissions')).items;if(active()){clearTimeout(expiryTimer);renderInitialParticipant();}};
-  const expire=()=>{buttonReady=false;googleBox.replaceChildren();googleBox.hidden=true;if(active()&&kind==='STUDENT'){status.textContent='로그인 준비 시간이 지났어요. 버튼을 다시 준비해 주세요.';retry.hidden=!consent.checked;}};
-  const invalidateSchool=()=>{attempt++;buttonReady=false;clearTimeout(expiryTimer);googleBox.replaceChildren();googleBox.hidden=true;retry.hidden=true;};
-  async function prepareGoogle(){
-    if(!active()||kind!=='STUDENT'||!consent.checked||busy||preparing)return;
-    if(buttonReady&&Date.now()<expiresAt){googleBox.hidden=false;return;}
-    preparing=true;const attemptId=++attempt;retry.hidden=true;schoolError.textContent='';status.textContent='학교 계정 로그인을 준비하고 있어요…';
-    try{
-      const config=await api('/api/auth/config');
-      if(!active()||kind!=='STUDENT'||!consent.checked)return;
-      if(!config.configured||!config.google_client_id)throw new Error('학교 계정 로그인을 준비 중이에요. 운영진에게 문의해 주세요.');
-      const google=await loadGoogleIdentity();
-      if(!active()||kind!=='STUDENT'||!consent.checked)return;
-      const challenge=await api('/api/auth/google/challenge',{method:'POST',body:{consent:true}});
-      if(!active()||kind!=='STUDENT'||!consent.checked||attemptId!==attempt)return;
-      if(typeof challenge.nonce!=='string'||!challenge.nonce)throw new Error('로그인을 준비하지 못했어요. 다시 시도해 주세요.');
-      // Each challenge has one current callback. A later challenge replaces the
-      // configuration; stale callbacks cannot submit after switching views.
-      google.initialize({client_id:config.google_client_id,nonce:challenge.nonce,hd:config.school_domain||'ksa.hs.kr',auto_select:false,button_auto_select:false,ux_mode:'popup',callback:async response=>{
-        if(!active()||attemptId!==attempt||kind!=='STUDENT'||!consent.checked||busy||!buttonReady)return;
-        if(Date.now()>=expiresAt){expire();return;}
-        if(typeof response.credential!=='string'||!response.credential){schoolError.textContent='Google 인증 결과를 받지 못했어요. 다시 시도해 주세요.';return;}
-        lock(true);status.textContent='학교 계정을 확인하고 있어요…';schoolError.textContent='';
-        try{await api('/api/auth/google',{method:'POST',body:{credential:response.credential,consent:true}});if(active())await complete();}
-        catch(err){if(active()){schoolError.textContent=loginError(err);buttonReady=false;googleBox.replaceChildren();status.textContent='다시 준비한 뒤 학교 계정을 선택해 주세요.';retry.hidden=false;}}
-        finally{if(active())lock(false);}
-      }});
-      googleBox.replaceChildren();googleBox.hidden=false;
-      google.renderButton(googleBox,{type:'standard',theme:'outline',size:'large',text:'signin_with',shape:'rectangular',width:Math.min(400,Math.max(200,Math.floor(googleBox.getBoundingClientRect().width))),locale:'ko'});
-      buttonReady=true;expiresAt=Date.now()+9*60*1000;clearTimeout(expiryTimer);expiryTimer=setTimeout(expire,9*60*1000);
-      status.textContent='아래 버튼에서 학교 Google 계정을 선택해 주세요.';$('.school-popup-help',panel).hidden=false;
-    }catch(err){if(active()){schoolError.textContent=loginError(err);status.textContent='로그인 버튼을 준비하지 못했어요.';retry.hidden=!consent.checked;}}
-    finally{preparing=false;if(active()&&kind==='STUDENT'&&consent.checked&&attemptId!==attempt)prepareGoogle();}
-  }
-  consent.onchange=()=>{if(consent.checked)prepareGoogle();else{invalidateSchool();status.textContent='동의하면 Google 로그인 버튼이 나타나요.';}};
-  retry.onclick=()=>{buttonReady=false;googleBox.replaceChildren();googleBox.hidden=true;prepareGoogle();};
+  const complete=async()=>{storage.remove('draft');storage.remove('pending');currentResult=null;state=await api('/api/state');historyItems=(await api('/api/me/submissions')).items;if(active())renderInitialParticipant();};
   const tabs=$$('[data-kind]',panel);
-  function chooseTab(el){if(busy)return;if(kind==='STUDENT'&&el.dataset.kind!=='STUDENT')invalidateSchool();kind=el.dataset.kind;tabs.forEach(b=>{const selected=b===el;b.classList.toggle('active',selected);b.setAttribute('aria-selected',String(selected));b.tabIndex=selected?0:-1;});$('#student-panel').hidden=kind!=='STUDENT';$('#guest-panel').hidden=kind!=='GUEST';googleBox.hidden=kind!=='STUDENT'||!consent.checked||!buttonReady;if(kind==='STUDENT'&&consent.checked)prepareGoogle();valid();}
+  function chooseTab(el){if(busy)return;kind=el.dataset.kind;tabs.forEach(b=>{const selected=b===el;b.classList.toggle('active',selected);b.setAttribute('aria-selected',String(selected));b.tabIndex=selected?0:-1;});$('#student-panel').hidden=kind!=='STUDENT';$('#guest-panel').hidden=kind!=='GUEST';valid();}
   tabs.forEach(el=>{el.onclick=()=>chooseTab(el);el.onkeydown=e=>{if(['ArrowLeft','ArrowRight','Home','End'].includes(e.key)){e.preventDefault();const target=e.key==='Home'?tabs[0]:e.key==='End'?tabs[1]:tabs[el===tabs[0]?1:0];chooseTab(target);target.focus();}};});
   $$('[data-privacy]',panel).forEach(el=>el.onclick=privacyDialog);
-  form.addEventListener('input',valid);
-  form.onsubmit=async e=>{e.preventDefault();if(busy||kind!=='GUEST'||!form.reportValidity())return;const fd=new FormData(form);lock(true);$('#join-submit').textContent='참가 등록 중…';$('#join-error').textContent='';
-    try{await api('/api/session',{method:'POST',body:{kind:'GUEST',nickname:fd.get('nickname').trim(),consent:fd.has('consent')}});if(active())await complete();}
-    catch(err){if(active()){$('#join-error').textContent=loginError(err);$('#join-submit').textContent='외부인으로 시작하기 →';}}
+  forms.forEach(f=>f.addEventListener('input',valid));
+  // FormData is read before lock() disables the inputs, since disabled fields are left out of it.
+  const join=(form,which,fields,label)=>{form.onsubmit=async e=>{e.preventDefault();if(busy||kind!==which||!form.reportValidity())return;const fd=new FormData(form);const button=$('[type=submit]',form),error=$('.error-text',form);lock(true);button.textContent='참가 등록 중…';error.textContent='';
+    try{await api('/api/session',{method:'POST',body:{kind:which,...fields(fd),consent:fd.has('consent')}});if(active())await complete();}
+    catch(err){if(active()){error.textContent=loginError(err);button.textContent=label;}}
     finally{if(active())lock(false);}
-  };
+  };};
+  join($('#student-form'),'STUDENT',fd=>({student_id:fd.get('student_id').trim(),name:fd.get('name').trim(),nickname:fd.get('nickname').trim()}),'재학생으로 시작하기 →');
+  join($('#join-form'),'GUEST',fd=>({nickname:fd.get('nickname').trim()}),'외부인으로 시작하기 →');
 }
 function renderInitialParticipant(){
   if(state.needs_nickname)return renderNickname();
@@ -149,7 +102,7 @@ function renderInitialParticipant(){
   if((location.pathname==='/result' || today.some(r=>r.reward?.status==='ISSUED')) && today.length){currentResult=today.find(r=>r.reward?.status==='ISSUED')||today[0];renderResult();}
   else if(!state.open_now || state.attempts_left<=0)renderClosed();else renderPlay();
 }
-// Students sign in with Google but play under a nickname they pick once.
+// Students from before nicknames existed pick one once before playing.
 function renderNickname(){
   currentHoldCancel?.();currentView='nickname';goto('/');
   app.innerHTML=gameFrame(`${topLine()}<form class="join-form" id="nickname-form"><div class="eyebrow">CALL SIGN / 닉네임</div><h2>작전에서 쓸 닉네임을 정하세요</h2><label class="field"><span>닉네임 <small class="muted">작전 현황과 명예의 전당에 표시돼요</small></span><input name="nickname" autocomplete="off" minlength="2" maxlength="10" placeholder="2~10글자, 나만의 호출명" required></label><p class="hint">닉네임은 한 번 정하면 바꿀 수 없어요. 실명·학번·연락처는 쓰지 마세요.</p><p id="nickname-error" class="error-text" role="alert"></p><button type="submit" class="btn full" id="nickname-submit">이 닉네임으로 시작하기 <span aria-hidden="true">→</span></button></form>`);
@@ -310,7 +263,7 @@ async function boot(){
   $('#privacy-link').onclick=privacyDialog;setInterval(tickClocks,1000);
   try{
     const route=location.pathname;
-    if(route.startsWith('/admin')){currentView='admin';const module=await import('/admin.js?v=nickname-20261029-r8');await module.mountAdmin(app);return;}
+    if(route.startsWith('/admin')){currentView='admin';const module=await import('/admin.js?v=student-id-20261029-r9');await module.mountAdmin(app);return;}
     if(route==='/board'){renderBoard(await api('/api/scoreboard'));startLive();try{await navigator.wakeLock?.request('screen');}catch{}return;}
     state=await api('/api/state');
     if(route==='/hall'){hallScope=state.test_mode?'DAY1':`DAY${state.day_no||1}`;await loadHall();startLive();return;}

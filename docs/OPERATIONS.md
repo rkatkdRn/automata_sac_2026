@@ -37,8 +37,6 @@ ADMIN_PIN=여기에_직접_정한_긴_비밀번호
 DB_PATH=data/rehearsal.db
 PORT=8000
 PRIVACY_CONTACT=Automata 운영 담당자에게 문의
-# 학생 로그인용 Web Client ID (설정법: docs/GOOGLE_LOGIN.md)
-GOOGLE_CLIENT_ID=
 ```
 
 로컬 SQLite로 실행할 때 `DATABASE_URL`과 `DATABASE_URL_UNPOOLED`는 비워 두세요. 실제 행사는 `DB_PATH=data/blotto.db`, 개발은 `data/dev.db`, 리허설은 `data/rehearsal.db`처럼 분리합니다. 환경 변수로 이미 설정한 값은 `.env`보다 우선합니다.
