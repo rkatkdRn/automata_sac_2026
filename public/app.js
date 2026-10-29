@@ -164,8 +164,8 @@ function renderPlay(){
   };
 }
 function renderResult(){
-  if(!currentResult)return renderInitialParticipant();currentHoldCancel?.();currentView='result';goto('/result');const r=currentResult;const rank=r.rank_estimate;const reward=r.reward;
-  app.innerHTML=gameFrame(`${topLine()}<div class="result-summary"><div class="eyebrow">AFTER ACTION REPORT / ${r.attempt_no}차 작전</div><div class="result-rate">${(Number(r.win_rate)*100).toFixed(1)}<span>%</span></div><p class="result-rank">${rank?.rank?`임시 순위 <b>${rank.rank}위</b> / ${rank.of}명`:'순위를 계산하고 있어요'} · 상대 ${Number(r.opponents)}개 전략</p><p class="hint">제출 순간의 승률 · 순위는 이후 달라질 수 있어요.</p></div>${reward?rewardMarkup(reward):'<div class="notice">이번 제출은 순위만 반영돼요.<br>오늘의 간식은 첫 제출 결과에서 확인해 주세요.</div>'}<div class="nemesis"><h3>${r.nemesis?'이 전략이 당신의 천적':'천적 없음!'}</h3>${r.nemesis?`${allocation(r.nemesis.strategy)}<p>전선 ${r.nemesis.lost_lanes.length}개를 내주고 있어요 (${r.nemesis.lost_lanes.join('·')}번).</p>`:'<p>제출할 때 나를 이긴 상대가 없었어요.</p>'}</div><button class="btn full" id="retry-play" ${state.attempts_left<=0?'disabled':''}>${state.attempts_left>0?`다시 도전 · 오늘 ${state.attempts_left}회 남음`:'오늘의 도전을 모두 사용했어요'}</button><div class="below-action"><button type="button" class="text-btn" id="my-history">내 작전 기록</button><a href="/hall">명예의 전당</a></div>`);
+  if(!currentResult)return renderInitialParticipant();currentHoldCancel?.();currentView='result';goto('/result');const r=currentResult;const rank=r.rank_estimate;const reward=r.reward;const winRate=(Number(r.win_rate)*100).toFixed(1);const top=rank?.rank&&rank.of?Math.max(1,Math.round(rank.rank/rank.of*100)):null;
+  app.innerHTML=gameFrame(`${topLine()}<div class="result-summary"><div class="eyebrow">AFTER ACTION REPORT / ${r.attempt_no}차 작전</div>${top?`<div class="result-rate"><span class="prefix">상위</span>${top}<span>%</span></div>`:''}<div class="result-rate"><span class="prefix">승률</span>${winRate}<span>%</span></div><p class="result-rank">${rank?.rank?`임시 순위 <b>${rank.rank}위</b> / ${rank.of}명`:'순위를 계산하고 있어요'} · 상대 ${Number(r.opponents)}개 전략</p><p class="hint">제출 순간의 승률 · 순위는 이후 달라질 수 있어요.</p></div>${reward?rewardMarkup(reward):'<div class="notice">이번 제출은 순위만 반영돼요.<br>오늘의 간식은 첫 제출 결과에서 확인해 주세요.</div>'}<div class="nemesis"><h3>${r.nemesis?'이 전략이 당신의 천적':'천적 없음!'}</h3>${r.nemesis?`${allocation(r.nemesis.strategy)}<p>전선 ${r.nemesis.lost_lanes.length}개를 내주고 있어요 (${r.nemesis.lost_lanes.join('·')}번).</p>`:'<p>제출할 때 나를 이긴 상대가 없었어요.</p>'}</div><button class="btn full" id="retry-play" ${state.attempts_left<=0?'disabled':''}>${state.attempts_left>0?`다시 도전 · 오늘 ${state.attempts_left}회 남음`:'오늘의 도전을 모두 사용했어요'}</button><div class="below-action"><button type="button" class="text-btn" id="my-history">내 작전 기록</button><a href="/hall">명예의 전당</a></div>`);
   bindLogout();$('#my-history').onclick=renderHistory;$('#retry-play').onclick=()=>{if(state.open_now)renderPlay();else renderClosed();};if(reward)bindReward(reward);tickClocks();
 }
 function rewardMarkup(r){
@@ -297,7 +297,7 @@ async function boot(){
   $('#privacy-link').onclick=privacyDialog;setInterval(tickClocks,1000);
   try{
     const route=location.pathname;
-    if(route.startsWith('/admin')){currentView='admin';const module=await import('/admin.js?v=test-mode-20261029-r3');await module.mountAdmin(app);return;}
+    if(route.startsWith('/admin')){currentView='admin';const module=await import('/admin.js?v=test-mode-20261029-r4');await module.mountAdmin(app);return;}
     if(route==='/board'){renderBoard(await api('/api/scoreboard'));startLive();try{await navigator.wakeLock?.request('screen');}catch{}return;}
     state=await api('/api/state');
     if(route==='/hall'){hallScope=state.test_mode?'DAY1':`DAY${state.day_no||1}`;await loadHall();startLive();return;}
