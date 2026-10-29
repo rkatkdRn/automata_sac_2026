@@ -210,7 +210,7 @@ def test_T10_freeze_immutable_while_pool_grows_next_day(booth):
     booth.open()
     guest = booth.guest()
     ok(booth.submit(guest))
-    board = ok(guest.get("/api/scoreboard"))
+    board = ok(booth.admin.get("/api/admin/scoreboard"))
     assert board["pool_size"] == 51
     assert len(board["rankings"]) == 1
     ok(booth.admin.post("/api/admin/booth", json={"action": "CLOSE"}))
@@ -229,18 +229,18 @@ def test_T09_cycle_is_held_at_least_sixty_seconds(booth):
     cycle_strategies = [[26, 36, 15, 7, 17], [40, 13, 13, 30, 5], [46, 11, 0, 14, 30]]
     for i, strategy in enumerate(cycle_strategies):
         ok(booth.submit(booth.guest(f"순환{i}"), strategy))
-    first = ok(booth.admin.get("/api/scoreboard"))["cycle"]
+    first = ok(booth.admin.get("/api/admin/scoreboard"))["cycle"]
     assert first is not None
     original = {r["submission_id"] for r in first}
     booth.clock[0] += timedelta(seconds=1)
     newcomer = booth.guest("새순환")
     strategy = [22, 21, 23, 3, 32]
     ok(booth.submit(newcomer, strategy))
-    held = ok(booth.admin.get("/api/scoreboard"))["cycle"]
+    held = ok(booth.admin.get("/api/admin/scoreboard"))["cycle"]
     assert {r["submission_id"] for r in held} == original
     booth.clock[0] += timedelta(seconds=61)
     ok(booth.submit(booth.guest("새순환둘"), strategy))
-    refreshed = ok(booth.admin.get("/api/scoreboard"))["cycle"]
+    refreshed = ok(booth.admin.get("/api/admin/scoreboard"))["cycle"]
     assert {r["submission_id"] for r in refreshed} != original
 
 
@@ -601,11 +601,11 @@ def test_test_mode_between_real_days_keeps_pools_and_day_order(booth):
     booth.open(threshold=0)
     result = ok(booth.submit(booth.guest("시험둘")))
     assert result["opponents"] == 50 and result["pool_size"] == 51
-    board = ok(admin.get("/api/scoreboard"))
+    board = ok(booth.admin.get("/api/admin/scoreboard"))
     assert board["test_mode"] and [r["nickname"] for r in board["rankings"]] == ["시험둘"]
     ok(admin.post("/api/admin/booth", json={"action": "CLOSE"}))
     ok(admin.post("/api/admin/day", json={"day_no": 1}))
-    assert [r["nickname"] for r in ok(admin.get("/api/scoreboard"))["rankings"]] == ["일차손님"]
+    assert [r["nickname"] for r in ok(booth.admin.get("/api/admin/scoreboard"))["rankings"]] == ["일차손님"]
     ok(admin.post("/api/admin/day", json={"day_no": 2}))
     ok(admin.post("/api/admin/day", json={"day_no": TEST_DAY}))
     # Visiting test mode is not a way back to an earlier real day.
@@ -626,7 +626,7 @@ def test_test_mode_opens_and_scores_without_seeds(booth):
     assert first["opponents"] == 0 and first["win_rate"] == 0.0 and first["reward"]["kind"] == "BASIC"
     second = ok(booth.submit(booth.guest("둘째시험"), WIN))
     assert second["opponents"] == 1 and second["reward"]["kind"] == "TOP_CHOICE"
-    board = ok(admin.get("/api/scoreboard"))
+    board = ok(booth.admin.get("/api/admin/scoreboard"))
     assert board["test_mode"] and len(board["rankings"]) == 2
 
 
@@ -743,3 +743,21 @@ def test_threshold_mode_column_is_added_to_existing_database(tmp_path, monkeypat
     with sqlite3.connect(path) as new:
         assert new.execute("SELECT mode,value_bp FROM threshold_history").fetchall() == [("FIXED", 7200)]
         assert "top_bp" in [row[1] for row in new.execute("PRAGMA table_info(submissions)")]
+
+
+def test_public_board_hides_strategies_and_result_shows_place_in_pool(booth):
+    booth.open()
+    winner = ok(booth.submit(booth.guest("숨김일등"), WIN))
+    loser = ok(booth.submit(booth.guest("숨김꼴찌"), LOSE))
+    # The place and share use the same pool as the snack rule (50 seeds + both plays).
+    assert winner["rank_estimate"]["rank"] == 1 and winner["rank_estimate"]["of"] == 51
+    assert loser["rank_estimate"]["rank"] == 52 and loser["rank_estimate"]["of"] == 52 and loser["top_bp"] == 10000
+    assert winner["today_count"] == 1 and loser["today_count"] == 2
+    public = ok(booth.client().get("/api/scoreboard"))
+    assert public["today_count"] == 2 and public["pool_size"] == 52
+    assert "rankings" not in public and "cycle" not in public
+    assert all(set(r) == {"nickname", "submitted_at"} for r in public["recent"])
+    assert sorted(r["nickname"] for r in public["recent"]) == ["숨김꼴찌", "숨김일등"]
+    error(booth.client().get("/api/admin/scoreboard"), "UNAUTHORIZED")
+    full = ok(booth.admin.get("/api/admin/scoreboard"))
+    assert full["rankings"][0]["nickname"] == "숨김일등" and full["rankings"][0]["strategy"] == WIN

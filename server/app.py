@@ -150,6 +150,8 @@ def create_app():
     def admin_logout(request:Request):
         data=s.logout(admin(request));response=JSONResponse(data);response.delete_cookie(s.ADMIN_COOKIE,path='/');return response
 
+    @app.get('/api/admin/scoreboard')
+    def admin_scoreboard(request:Request):return s.admin_board(admin(request))
     @app.get('/api/admin/dashboard')
     def dashboard(request:Request):return s.dashboard(admin(request))
     @app.post('/api/admin/day')

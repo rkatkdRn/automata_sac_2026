@@ -128,11 +128,17 @@ def pass_rule(c, day_no):
     row=c.one('SELECT mode,value_bp FROM threshold_history WHERE day_no=? ORDER BY set_at DESC LIMIT 1',(day_no,))
     return (row['mode'],row['value_bp']) if row else None
 
-def top_share_bp(rows, analysis, row_id):
-    """Position in the pool as a rounded-up share in 1/10000 (1 = best); ties count in the player's favour."""
+def pool_place(rows, analysis, row_id):
+    """Place in the whole pool (1 = best); ties count in the player's favour."""
     mine=engine.rate_fraction(analysis[row_id])
-    better=sum(1 for r in rows if engine.rate_fraction(analysis[r['id']])>mine)
-    return -(-(better+1)*10000//len(rows))
+    return 1+sum(1 for r in rows if engine.rate_fraction(analysis[r['id']])>mine)
+
+def top_share_bp(rows, analysis, row_id):
+    """Position in the pool as a rounded-up share in 1/10000 (1 = best)."""
+    return -(-pool_place(rows,analysis,row_id)*10000//len(rows))
+
+def today_count(c, day_no):
+    return c.scalar('SELECT COUNT(DISTINCT participant_id) FROM submissions WHERE is_seed=0 AND day_no=?',(day_no,))
 
 # Every voucher hands over 1 마이쮸; a top voucher adds 1 premium item (SESAME or ACE).
 def handed(kind, choice):
@@ -385,10 +391,10 @@ def submit(token,payload):
             (new['id'],request_id,me['id'],day['day_no'],done+1,*strategy,points,n,bp,top_bp,new['submitted_at']))
         if reward:
             c.execute('INSERT INTO entitlements(id,submission_id,code,kind,premium_exhausted,issued_at) VALUES(?,?,?,?,?,?)',(reward['id'],new['id'],reward['code'],reward['kind'],reward['premium_exhausted'],stamp()))
-        ranking=engine.rank_rows(allrows,analysis=analysis)
-        myrank=next((r['rank'] for r in ranking if r['participant_id']==me['id']),None)
+        # Rank and share use the same pool as the snack rule, so the result screen never contradicts the snack.
+        place=pool_place(allrows,analysis,new['id'])
         resp={'id':new['id'],'day_no':day['day_no'],'attempt_no':done+1,'attempts_left':MAX_ATTEMPTS-1-done,'strategy':strategy,'win_rate':points/(2*n) if n else 0.0,'points':points,'opponents':n,'threshold_bp_used':bp,'pass_mode':mode,'top_bp':top_bp,'submitted_at':new['submitted_at'],
-            'rank_estimate':{'rank':myrank,'of':len(ranking),'is_provisional':True},'reward':entitlement_public(reward),
+            'rank_estimate':{'rank':place,'of':len(allrows),'is_provisional':True},'today_count':today_count(c,day['day_no']),'reward':entitlement_public(reward),
             'nemesis':engine.nemesis(strategy,allrows,participant_id=me['id'],analysis=analysis),'pool_size':len(allrows)}
         c.execute('UPDATE submissions SET response_json=? WHERE id=?',(dumps(resp),new['id']))
         db.set_config(c,cache_key('score_cache',test),dumps(analysis)); close_if_cap(c,day); db.bump(c)
@@ -450,16 +456,31 @@ def claim(token,entitlement_id,payload):
         close_if_cap(c,day);db.bump(c)
         return {'status':'CLAIMED','choice':choice,'claimed_at':claimed_at,'code':e['code'],'entitlement_id':e['id']}
 
-def board():
+# The public board hides every strategy and ranking (top 10, cycle, recent allocations) so players
+# cannot copy winners; it shows only counts. Staff see the full board through the admin API.
+PUBLIC_BOARD=('day_no','booth_state','mychew_left','pool_size','today_count','updated_at','version','test_mode')
+
+def board(full=False):
+    data=board_full()
+    if full: return data
+    public={k:data[k] for k in PUBLIC_BOARD}
+    public['recent']=[{k:r[k] for k in ('nickname','submitted_at')} for r in data['recent']]
+    return public
+
+def admin_board(token):
+    with db.transaction() as c: require_admin(c,token)
+    return board(full=True)
+
+def board_full():
     with db.transaction() as c:
         version=int(db.config(c,'version','0')); test=is_test(get_day(c))
         cached=json.loads(db.config(c,cache_key('board_cache',test),'{}'))
-        if cached.get('version')==version:
+        if cached.get('version')==version and 'today_count' in cached:
             return cached
     with db.transaction(write=True) as c:
         version=int(db.config(c,'version','0')); day=get_day(c); test=is_test(day)
         cached=json.loads(db.config(c,cache_key('board_cache',test),'{}'))
-        if cached.get('version')==version:
+        if cached.get('version')==version and 'today_count' in cached:
             return cached
         rows=pool_rows(c,test=test); analysis=analysis_in(c,rows,test); ranked=engine.rank_rows(rows,analysis=analysis)
         cycle=json.loads(db.config(c,cache_key('cycle',test),'null')); cycle_at=db.config(c,cache_key('cycle_at',test),'')
@@ -474,7 +495,7 @@ def board():
                 recent.append({'nickname':row['nickname'],'strategy':row['strategy'],'win_rate':row['points']/(2*row['opponents']) if row['opponents'] else 0,'submitted_at':row['submitted_at']})
                 if len(recent)==6: break
         data={'rankings':ranked[:10],'cycle':cycle,'recent':recent,'day_no':day['day_no'],'booth_state':day['booth_state'],
-            'mychew_left':max(0,day['mychew_cap_cum']-counters(c,test)['mychew_used']),'pool_size':len(rows),'updated_at':stamp(),'version':int(db.config(c,'version','0')),'test_mode':test}
+            'mychew_left':max(0,day['mychew_cap_cum']-counters(c,test)['mychew_used']),'pool_size':len(rows),'today_count':today_count(c,day['day_no']),'updated_at':stamp(),'version':int(db.config(c,'version','0')),'test_mode':test}
         db.set_config(c,cache_key('board_cache',test),dumps(data))
         return data
 

@@ -126,7 +126,7 @@ def test_same_name_different_ids_are_separate_players(booth):
     assert aid != bid
     ok(booth.submit(a))
     ok(booth.submit(b))
-    rows = ok(a.get("/api/scoreboard"))["rankings"]
+    rows = ok(booth.admin.get("/api/admin/scoreboard"))["rankings"]
     assert {r["nickname"] for r in rows if r["participant_id"] in (aid, bid)} == {"첫째별명", "둘째별명"}
     assert "동명이인" not in json.dumps(rows, ensure_ascii=False)
 
@@ -163,7 +163,7 @@ def test_earlier_google_student_picks_a_nickname_before_playing(booth):
     assert chosen["nickname"] == "내별명" and chosen["needs_nickname"] is False
     error(client.post("/api/me/nickname", json={"nickname": "다른별명"}), "NICKNAME_LOCKED")
     assert ok(booth.submit(client))["attempt_no"] == 1
-    assert ok(client.get("/api/scoreboard"))["rankings"][0]["nickname"] == "내별명"
+    assert ok(booth.admin.get("/api/admin/scoreboard"))["rankings"][0]["nickname"] == "내별명"
     # guests choose their nickname when joining, not through this endpoint
     error(booth.guest().post("/api/me/nickname", json={"nickname": "새손님별명"}), "FORBIDDEN")
     error(TestClient(booth.app).post("/api/me/nickname", json={"nickname": "로그인안함"}), "UNAUTHORIZED")
@@ -197,7 +197,7 @@ def test_legacy_migration_preserves_attempts_rewards_and_revokes_old_cookie(boot
         db.set_config(c, "board_cache", "{}")
     assert ok(legacy.get("/api/state"))["participant_id"] is None
     error(legacy.get("/api/me/submissions"), "UNAUTHORIZED")
-    before = ok(legacy.get("/api/scoreboard"))
+    before = ok(booth.admin.get("/api/admin/scoreboard"))
     assert "예전미인증실명" not in json.dumps(before, ensure_ascii=False)
     assert before["rankings"][0]["nickname"] == "예전공개별명"
     verified, response = booth.student(name="예전미인증실명", student_id="00-000", nickname="새학생별명")
@@ -211,7 +211,7 @@ def test_legacy_migration_preserves_attempts_rewards_and_revokes_old_cookie(boot
     assert ok(legacy.get("/api/state"))["participant_id"] is None
     error(legacy.get("/api/me/submissions"), "UNAUTHORIZED")
     assert ok(booth.submit(verified))["attempt_no"] == 2
-    after = ok(verified.get("/api/scoreboard"))
+    after = ok(booth.admin.get("/api/admin/scoreboard"))
     assert after["rankings"][0]["nickname"] == "새학생별명"
     claims = ok(booth.admin.get("/api/admin/claims"))["items"]
     assert claims[0]["nickname"] == "새학생별명"
