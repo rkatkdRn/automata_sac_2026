@@ -96,11 +96,26 @@ def rate_limit(key, limit, window):
 
 def display_name(row):
     if row.get('name_hidden'): return '익명 전술가'
+    # Students are shown by the nickname they chose after Google login.
+    if row.get('kind')=='STUDENT' and row.get('nickname_chosen'): return row['nickname']
     # A legacy student's self-entered name must stay private until Google login
     # and the new consent explicitly authorize displaying the account name.
     if row.get('verified_school_subject') and row.get('real_name'):
         return row['real_name']
     return row['nickname']
+
+def needs_nickname(row):
+    return bool(row and row['kind']=='STUDENT' and not row.get('nickname_chosen'))
+
+def valid_nickname(nickname):
+    need(isinstance(nickname,str) and 2<=len(nickname.strip())<=10,'INVALID_NICKNAME','닉네임은 2~10자예요.',400)
+    nickname=nickname.strip()
+    need(not any(ord(ch)<32 for ch in nickname) and not re.search(r'[<>@]|\d{7,}',nickname),'INVALID_NICKNAME','닉네임에 연락처나 특수 기호를 쓰지 마세요.',400)
+    # 'school-' is the placeholder prefix for students who haven't chosen yet
+    need(not nickname.lower().startswith('school-'),'INVALID_NICKNAME','다른 닉네임을 골라 주세요.',400)
+    blocked=['시발','씨발','씨팔','병신','개새끼','fuck','shit']+[v.strip().lower() for v in os.getenv('BLOCKED_NICKNAMES','').split(',') if v.strip()]
+    need(not any(v in nickname.lower().replace(' ','') for v in blocked),'INVALID_NICKNAME','다른 닉네임을 골라 주세요.',400)
+    return nickname
 
 def threshold(c, day_no):
     rule=pass_rule(c,day_no)
@@ -152,7 +167,7 @@ def state_in(c, token=None):
     return {'day_no':day['day_no'],'booth_state':booth,'open_now':bool(booth=='OPEN' and within and not purged),
         'next_open':next_open,'attempts_left':max(0,3-count),'mychew_left':max(0,day['mychew_cap_cum']-counters(c,is_test(day))['mychew_used']),'test_mode':is_test(day),
         'participant_id':person['id'] if person else None,'nickname':display_name(person) if person else None,
-        'kind':person['kind'] if person else None,'auth_method':('GOOGLE' if person['kind']=='STUDENT' else 'GUEST') if person else None,
+        'kind':person['kind'] if person else None,'needs_nickname':needs_nickname(person),'auth_method':('GOOGLE' if person['kind']=='STUDENT' else 'GUEST') if person else None,
         'server_time':stamp(),'privacy_contact':os.getenv('PRIVACY_CONTACT','Automata 부스 운영진'),
         'cloud_mode':bool(os.getenv('DATABASE_URL')),'purged':purged,'threshold_bp':threshold(c,day['day_no']),'pass_mode':(pass_rule(c,day['day_no']) or (None,))[0]}
 
@@ -164,11 +179,7 @@ def login(payload, old_token=None):
     kind=payload.get('kind'); nickname=payload.get('nickname','')
     need(kind!='STUDENT','GOOGLE_LOGIN_REQUIRED','재학생은 학교 Google 계정으로 로그인해 주세요.',401)
     need(kind=='GUEST','INVALID_INPUT','외부인 임시 참가를 선택해 주세요.',400)
-    need(isinstance(nickname,str) and 2<=len(nickname.strip())<=10,'INVALID_NICKNAME','닉네임은 2~10자예요.',400)
-    nickname=nickname.strip()
-    need(not any(ord(ch)<32 for ch in nickname) and not re.search(r'[<>@]|\d{7,}',nickname),'INVALID_NICKNAME','닉네임에 연락처나 특수 기호를 쓰지 마세요.',400)
-    blocked=['시발','씨발','씨팔','병신','개새끼','fuck','shit']+[v.strip().lower() for v in os.getenv('BLOCKED_NICKNAMES','').split(',') if v.strip()]
-    need(not any(v in nickname.lower().replace(' ','') for v in blocked),'INVALID_NICKNAME','다른 닉네임을 골라 주세요.',400)
+    nickname=valid_nickname(nickname)
     with db.transaction(write=True) as c:
         need(db.config(c,'purged')!='true','EVENT_ENDED','개인정보 파기가 완료되어 참여가 종료됐어요.')
         person=participant(c,old_token,False)
@@ -195,7 +206,7 @@ def login(payload, old_token=None):
 def session_public(c,person):
     day=get_day(c)
     attempts=c.scalar('SELECT COUNT(*) FROM submissions WHERE participant_id=? AND day_no=?',(person['id'],day['day_no']))
-    return {'participant_id':person['id'],'nickname':display_name(person),'kind':person['kind'],
+    return {'participant_id':person['id'],'nickname':display_name(person),'kind':person['kind'],'needs_nickname':needs_nickname(person),
             'auth_method':'GOOGLE' if person['kind']=='STUDENT' else 'GUEST','attempts_left':max(0,3-attempts)}
 
 
@@ -214,7 +225,7 @@ def require_google_config():
 
 def google_challenge(payload,old_cookie=None):
     require_google_config()
-    need(payload.get('consent') is True,'CONSENT_REQUIRED','학교 계정 정보 이용과 이름 공개에 동의해 주세요.',400)
+    need(payload.get('consent') is True,'CONSENT_REQUIRED','학교 계정 정보 이용과 닉네임 공개에 동의해 주세요.',400)
     cookie=secrets.token_urlsafe(32);nonce=secrets.token_urlsafe(32)
     with db.transaction(write=True) as c:
         need(db.config(c,'purged')!='true','EVENT_ENDED','개인정보 파기가 완료되어 참여가 종료됐어요.')
@@ -227,7 +238,7 @@ def google_challenge(payload,old_cookie=None):
 
 def google_login(payload,challenge_cookie,old_token=None):
     audience=require_google_config()
-    need(payload.get('consent') is True,'CONSENT_REQUIRED','학교 계정 정보 이용과 이름 공개에 동의해 주세요.',400)
+    need(payload.get('consent') is True,'CONSENT_REQUIRED','학교 계정 정보 이용과 닉네임 공개에 동의해 주세요.',400)
     credential=payload.get('credential')
     need(isinstance(credential,str) and 1<=len(credential)<=16000,'GOOGLE_AUTH_INVALID','Google 로그인 정보를 다시 받아 주세요.',401)
     need(isinstance(challenge_cookie,str) and 20<=len(challenge_cookie)<=200,'AUTH_CHALLENGE_EXPIRED','로그인 준비 시간이 지났어요. 학교 로그인 버튼을 다시 눌러 주세요.',401)
@@ -291,6 +302,20 @@ def google_login(payload,challenge_cookie,old_token=None):
         audit(c,'SCHOOL_LOGIN',details={'participant_id':person['id'],'legacy_linked':migrated});db.bump(c)
         return session_public(c,person),token
 
+def set_nickname(token,payload):
+    nickname=valid_nickname(payload.get('nickname',''))
+    with db.transaction(write=True) as c:
+        need(db.config(c,'purged')!='true','EVENT_ENDED','개인정보 파기가 완료되어 참여가 종료됐어요.')
+        me=participant(c,token)
+        need(me['kind']=='STUDENT','FORBIDDEN','외부인 닉네임은 참가 등록 때 정해요.',403)
+        # chosen once, so the name on the leaderboard and hall of fame stays put
+        need(not me.get('nickname_chosen'),'NICKNAME_LOCKED','닉네임은 한 번만 정할 수 있어요.',409)
+        need(c.one('SELECT id FROM participants WHERE nickname=? AND id!=?',(nickname,me['id'])) is None,'NICKNAME_TAKEN','이미 쓰고 있는 닉네임이에요.')
+        c.execute('UPDATE participants SET nickname=?,nickname_chosen=1 WHERE id=?',(nickname,me['id']))
+        me.update(nickname=nickname,nickname_chosen=1)
+        clear_caches(c);audit(c,'NICKNAME_SET',details={'participant_id':me['id']});db.bump(c)
+        return session_public(c,me)
+
 def logout(token,challenge_cookie=None):
     if token or challenge_cookie:
         with db.transaction(write=True) as c:
@@ -321,12 +346,12 @@ def pool_rows(c, for_submission=False, test=False):
         # Display names and historical snapshot scores are loaded by board reads.
         rows=c.all(f'SELECT id,participant_id,day_no,l1,l2,l3,l4,l5,is_seed,is_ranked,submitted_at FROM submissions WHERE {pool_scope(test)} ORDER BY submitted_at,id')
     else:
-        rows=c.all(f'SELECT s.id,s.participant_id,s.day_no,s.l1,s.l2,s.l3,s.l4,s.l5,s.is_seed,s.is_ranked,s.points,s.opponents,s.submitted_at,p.nickname,p.name_hidden,p.real_name,i.google_sub AS verified_school_subject FROM submissions s LEFT JOIN participants p ON p.id=s.participant_id LEFT JOIN school_identities i ON i.participant_id=p.id WHERE {pool_scope(test,"s.")} ORDER BY s.submitted_at,s.id')
+        rows=c.all(f'SELECT s.id,s.participant_id,s.day_no,s.l1,s.l2,s.l3,s.l4,s.l5,s.is_seed,s.is_ranked,s.points,s.opponents,s.submitted_at,p.nickname,p.name_hidden,p.real_name,p.kind,p.nickname_chosen,i.google_sub AS verified_school_subject FROM submissions s LEFT JOIN participants p ON p.id=s.participant_id LEFT JOIN school_identities i ON i.participant_id=p.id WHERE {pool_scope(test,"s.")} ORDER BY s.submitted_at,s.id')
     for row in rows:
         row['strategy']=[row['l1'],row['l2'],row['l3'],row['l4'],row['l5']]
         if row['participant_id'] is None: row['nickname']='시드'
         elif not for_submission: row['nickname']=display_name(row)
-        row.pop('real_name',None);row.pop('verified_school_subject',None)
+        row.pop('real_name',None);row.pop('verified_school_subject',None);row.pop('kind',None);row.pop('nickname_chosen',None)
     return rows
 
 def analysis_in(c, rows, test=False):
@@ -364,6 +389,7 @@ def submit(token,payload):
     need(isinstance(request_id,str) and re.fullmatch(r'[A-Za-z0-9_-]{8,100}',request_id) is not None,'INVALID_REQUEST_ID','제출 식별값이 잘못됐어요. 화면을 새로 열어 주세요.',400)
     with db.transaction(write=True) as c:
         me=participant(c,token)
+        need(not needs_nickname(me),'NICKNAME_REQUIRED','먼저 닉네임을 정해 주세요.',409)
         saved=c.one('SELECT participant_id,response_json,l1,l2,l3,l4,l5 FROM submissions WHERE request_id=?',(request_id,))
         if saved:
             need(saved['participant_id']==me['id'],'FORBIDDEN','다른 참가자의 제출 요청이에요.',403)
@@ -514,7 +540,7 @@ def hall_in(c,scope):
     row=c.one('SELECT * FROM rank_freeze WHERE scope=?',(scope,))
     if not row: return {'scope':scope,'frozen':False,'frozen_at':None,'rankings':[]}
     rankings=json.loads(row['rankings_json'])
-    people={r['id']:display_name(r) for r in c.all('SELECT p.id,p.nickname,p.name_hidden,p.real_name,i.google_sub AS verified_school_subject FROM participants p LEFT JOIN school_identities i ON i.participant_id=p.id')}
+    people={r['id']:display_name(r) for r in c.all('SELECT p.id,p.nickname,p.name_hidden,p.real_name,p.kind,p.nickname_chosen,i.google_sub AS verified_school_subject FROM participants p LEFT JOIN school_identities i ON i.participant_id=p.id')}
     for rank in rankings: rank['nickname']=people.get(rank['participant_id'],'익명 전술가')
     return {'scope':scope,'frozen':True,'frozen_at':row['frozen_at'],'rankings':rankings}
 
@@ -649,12 +675,12 @@ def add_seeds(token,payload,single=False):
 def claims(token,status=None):
     with db.transaction() as c:
         require_admin(c,token); day=get_day(c)
-        rows=c.all('SELECT e.*,s.participant_id,s.day_no,p.nickname,p.name_hidden,p.real_name,i.google_sub AS verified_school_subject FROM entitlements e JOIN submissions s ON s.id=e.submission_id JOIN participants p ON p.id=s.participant_id LEFT JOIN school_identities i ON i.participant_id=p.id WHERE s.day_no=? ORDER BY e.issued_at DESC',(day['day_no'],))
+        rows=c.all('SELECT e.*,s.participant_id,s.day_no,p.nickname,p.name_hidden,p.real_name,p.kind AS p_kind,p.nickname_chosen,i.google_sub AS verified_school_subject FROM entitlements e JOIN submissions s ON s.id=e.submission_id JOIN participants p ON p.id=s.participant_id LEFT JOIN school_identities i ON i.participant_id=p.id WHERE s.day_no=? ORDER BY e.issued_at DESC',(day['day_no'],))
         counts={'ISSUED':0,'CLAIMED':0,'VOID':0}; by_item={x:0 for x in ITEMS}; items=[]
         for row in rows:
             counts[row['status']]+=1
             if row['status']=='CLAIMED': by_item[row['choice']]+=1
-            row['nickname']=display_name(row);row.pop('name_hidden',None);row.pop('real_name',None);row.pop('verified_school_subject',None);row['premium_exhausted']=bool(row['premium_exhausted'])
+            row['nickname']=display_name({**row,'kind':row.pop('p_kind')});row.pop('nickname_chosen',None);row.pop('name_hidden',None);row.pop('real_name',None);row.pop('verified_school_subject',None);row['premium_exhausted']=bool(row['premium_exhausted'])
             if not status or row['status']==status: items.append(row)
         return {'items':items,'counts':counts,'by_item':by_item}
 
@@ -694,7 +720,7 @@ def submission_log(token,day=None):
         day_no=get_day(c)['day_no'] if day in (None,'') else None if day=='ALL' else int(day) if str(day).isdigit() else -1
         need(day_no is None or day_no in REAL_DAYS+(TEST_DAY,),'INVALID_DAY','운영일을 확인해 주세요.',400)
         where='s.is_seed=0'+('' if day_no is None else ' AND s.day_no=?')
-        rows=c.all(f'SELECT s.id,s.day_no,s.attempt_no,s.participant_id,s.l1,s.l2,s.l3,s.l4,s.l5,s.points,s.opponents,s.top_bp,s.submitted_at,p.kind,p.nickname,p.name_hidden,p.real_name,i.google_sub AS verified_school_subject,e.id AS e_id,e.code,e.kind AS e_kind,e.choice,e.status,e.issued_at,e.claimed_at,e.premium_exhausted FROM submissions s JOIN participants p ON p.id=s.participant_id LEFT JOIN school_identities i ON i.participant_id=p.id LEFT JOIN entitlements e ON e.submission_id=s.id WHERE {where} ORDER BY s.submitted_at DESC,s.attempt_no DESC,s.id',() if day_no is None else (day_no,))
+        rows=c.all(f'SELECT s.id,s.day_no,s.attempt_no,s.participant_id,s.l1,s.l2,s.l3,s.l4,s.l5,s.points,s.opponents,s.top_bp,s.submitted_at,p.kind,p.nickname,p.name_hidden,p.real_name,p.nickname_chosen,i.google_sub AS verified_school_subject,e.id AS e_id,e.code,e.kind AS e_kind,e.choice,e.status,e.issued_at,e.claimed_at,e.premium_exhausted FROM submissions s JOIN participants p ON p.id=s.participant_id LEFT JOIN school_identities i ON i.participant_id=p.id LEFT JOIN entitlements e ON e.submission_id=s.id WHERE {where} ORDER BY s.submitted_at DESC,s.attempt_no DESC,s.id',() if day_no is None else (day_no,))
         items=[]
         for r in rows:
             items.append({'id':r['id'],'day_no':r['day_no'],'attempt_no':r['attempt_no'],'participant_id':r['participant_id'],'nickname':display_name(r),'kind':r['kind'],
@@ -761,11 +787,11 @@ def delete_submission(token,submission_id,payload):
 def participants(token):
     with db.transaction() as c:
         require_admin(c,token)
-        rows=c.all('SELECT p.id,p.nickname,p.kind,p.name_hidden,p.real_name,i.google_sub AS verified_school_subject,COUNT(s.id) AS submission_count FROM participants p LEFT JOIN submissions s ON s.participant_id=p.id LEFT JOIN school_identities i ON i.participant_id=p.id GROUP BY p.id,p.nickname,p.kind,p.name_hidden,p.real_name,i.google_sub ORDER BY p.nickname')
+        rows=c.all('SELECT p.id,p.nickname,p.kind,p.name_hidden,p.real_name,p.nickname_chosen,i.google_sub AS verified_school_subject,COUNT(s.id) AS submission_count FROM participants p LEFT JOIN submissions s ON s.participant_id=p.id LEFT JOIN school_identities i ON i.participant_id=p.id GROUP BY p.id,p.nickname,p.kind,p.name_hidden,p.real_name,p.nickname_chosen,i.google_sub ORDER BY p.nickname')
         for r in rows:
             r['nickname']=display_name(r);r['name_hidden']=bool(r['name_hidden'])
             r['auth_method']='GOOGLE' if r.get('verified_school_subject') else ('GUEST' if r['kind']=='GUEST' else 'LEGACY')
-            r.pop('real_name',None);r.pop('verified_school_subject',None)
+            r.pop('real_name',None);r.pop('verified_school_subject',None);r.pop('nickname_chosen',None)
         return {'items':rows}
 
 def hide(token,participant_id,payload):

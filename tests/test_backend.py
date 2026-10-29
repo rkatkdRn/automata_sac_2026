@@ -110,10 +110,13 @@ def booth(tmp_path, monkeypatch):
             ok(client.post("/api/session", json={"kind": "GUEST", "nickname": nickname or "손님" + uuid.uuid4().hex[:5], "consent": True}))
             return client
 
-        def student(self, name="테스트학생", student_id="00-000", nickname="학생별명"):
+        def student(self, name="테스트학생", student_id="00-000", nickname=None, choose=True):
             client = stack.enter_context(TestClient(app))
             credential = self.google_token(client, name=name, student_id=student_id)
-            response = client.post("/api/auth/google", json={"credential": credential, "nickname": nickname, "consent": True})
+            response = client.post("/api/auth/google", json={"credential": credential, "consent": True})
+            # a student picks a display nickname once, right after their first Google login
+            if choose and response.status_code == 200 and response.json()["needs_nickname"]:
+                response = client.post("/api/me/nickname", json={"nickname": nickname or "별명" + uuid.uuid4().hex[:6]})
             return client, response
 
         def configure(self, *, day=1, premium=40, mychew=188, rule="EITHER"):
@@ -332,7 +335,7 @@ def test_T14_sqlite_consistent_backup_restores_counts(booth, tmp_path):
 
 def test_T15_student_multidevice_real_name_and_consent(booth):
     booth.open()
-    a, response = booth.student()
+    a, response = booth.student(nickname="학생별명")
     identity = ok(response)
     ok(booth.submit(a))
     b, response = booth.student(nickname="바꿀수없음")
@@ -344,13 +347,15 @@ def test_T15_student_multidevice_real_name_and_consent(booth):
     _, response = booth.student(name="학교계정변경이름")
     updated = ok(response)
     assert updated["participant_id"] == identity["participant_id"]
-    assert updated["nickname"] == "학교계정변경이름"
+    # the chosen nickname is shown, never the Google account name
+    assert updated["nickname"] == "학생별명"
     other = booth.guest("외부별명")
     client = TestClient(booth.app)
     error(client.post("/api/session", json={"kind": "GUEST", "nickname": "외부별명", "consent": True}), "NICKNAME_TAKEN")
     response = client.post("/api/session", json={"kind": "GUEST", "nickname": "미동의자", "consent": False})
     assert response.status_code == 400
-    assert identity["nickname"] == "테스트학생"
+    assert identity["nickname"] == "학생별명"
+    assert "테스트학생" not in str(identity)
     assert "00-000" not in str(identity) and "ksa.hs.kr" not in str(identity)
 
 
@@ -358,7 +363,7 @@ def test_T16_top10_student_names_without_email_and_purge(booth):
     booth.open()
     students = []
     for i in range(12):
-        client, response = booth.student(name=f"학교실명{i}", student_id=f"26-{i:03d}", nickname=f"학생입력무시{i}")
+        client, response = booth.student(name=f"학교실명{i}", student_id=f"26-{i:03d}", nickname=f"학생별명{i}")
         ok(response)
         students.append(client)
         ok(booth.submit(client))
@@ -366,13 +371,14 @@ def test_T16_top10_student_names_without_email_and_purge(booth):
     hall = ok(booth.admin.post("/api/admin/freeze", json={"scope": "DAY1"}))
     assert len(hall["rankings"]) == 10
     assert [x["rank"] for x in hall["rankings"]] == list(range(1, 11))
-    assert "학교실명" in json.dumps(hall, ensure_ascii=False)
-    assert "학생입력무시" not in json.dumps(hall, ensure_ascii=False)
+    assert "학생별명" in json.dumps(hall, ensure_ascii=False)
+    assert "학교실명" not in json.dumps(hall, ensure_ascii=False)
     assert all(f'"26-{i:03d}"' not in json.dumps(hall, ensure_ascii=False) for i in range(12))
     assert "ksa.hs.kr" not in json.dumps(hall, ensure_ascii=False)
     ok(booth.admin.post("/api/admin/purge", json={"confirm": "PURGE", "reason": "테스트 행사 종료"}))
     public = ok(students[0].get("/api/hall?scope=DAY1"))
     assert "학교실명" not in json.dumps(public, ensure_ascii=False)
+    assert "학생별명" not in json.dumps(public, ensure_ascii=False)
     assert ok(students[0].get("/api/state"))["participant_id"] is None
     from server import db
     with db.transaction() as connection:

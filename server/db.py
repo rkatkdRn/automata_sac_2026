@@ -173,6 +173,8 @@ def initialize(force=False):
             # Columns added after the event database was created. Existing thresholds were all win rates.
             add_column(conn,'threshold_history','mode',"TEXT NOT NULL DEFAULT 'FIXED'")
             add_column(conn,'submissions','top_bp','INTEGER')
+            # Students pick their own display nickname after Google login; 0 = still the placeholder.
+            add_column(conn,'participants','nickname_chosen','INTEGER NOT NULL DEFAULT 0')
             for day, date, chew, premium in [(1,'2026-10-30',188,40),(2,'2026-10-31',338,72),(3,'2026-11-01',450,95),(TEST_DAY,'2026-10-27',188,40)]:
                 conn.execute('INSERT INTO day_config(day_no,date,sessions_json,mychew_cap_cum,premium_cap_cum) VALUES(?,?,?,?,?) ON CONFLICT(day_no) DO NOTHING', (day,date,'[["10:00","13:00"],["14:00","17:00"]]',chew,premium))
             for key,value in [('active_day','1'),('version','0'),('score_cache','{}'),('board_cache','{}'),('cycle','null'),('cycle_at',''),('purged','false')]:

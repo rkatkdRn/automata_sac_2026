@@ -10,6 +10,7 @@ import json
 import time
 from types import SimpleNamespace
 import pytest
+from fastapi.testclient import TestClient
 from test_backend import booth, ok, error
 from server.google_auth import verify_credential as _real_verify_credential
 
@@ -121,18 +122,45 @@ def test_identity_and_name_come_from_token_not_request(booth):
 
 def test_duplicate_real_names_and_public_name_refresh(booth):
     booth.open()
-    a, ra = booth.student(name="동명이인", student_id="00-000")
-    b, rb = booth.student(name="동명이인", student_id="24-103")
+    a, ra = booth.student(name="동명이인", student_id="00-000", nickname="첫째별명")
+    b, rb = booth.student(name="동명이인", student_id="24-103", nickname="둘째별명")
     aid, bid = ok(ra)["participant_id"], ok(rb)["participant_id"]
     assert aid != bid
     ok(booth.submit(a))
     ok(booth.submit(b))
     rows = ok(a.get("/api/scoreboard"))["rankings"]
-    assert sum(r["nickname"] == "동명이인" for r in rows) == 2
+    assert {r["nickname"] for r in rows if r["participant_id"] in (aid, bid)} == {"첫째별명", "둘째별명"}
+    assert "동명이인" not in json.dumps(rows, ensure_ascii=False)
+    # a changed Google account name never reaches the public board
     _, updated = booth.student(name="새등록이름", student_id="00-000")
     assert ok(updated)["participant_id"] == aid
     rows = ok(a.get("/api/scoreboard"))["rankings"]
-    assert next(r["nickname"] for r in rows if r["participant_id"] == aid) == "새등록이름"
+    assert next(r["nickname"] for r in rows if r["participant_id"] == aid) == "첫째별명"
+    assert "새등록이름" not in json.dumps(rows, ensure_ascii=False)
+
+
+def test_student_must_choose_unique_nickname_once_before_playing(booth):
+    booth.open()
+    booth.guest("손님별명")
+    client, response = booth.student(choose=False)
+    session = ok(response)
+    assert session["needs_nickname"] is True
+    state = ok(client.get("/api/state"))
+    assert state["needs_nickname"] is True
+    error(booth.submit(client), "NICKNAME_REQUIRED")
+    error(client.post("/api/me/nickname", json={"nickname": "손님별명"}), "NICKNAME_TAKEN")
+    error(client.post("/api/me/nickname", json={"nickname": "school-abc"}), "INVALID_NICKNAME")
+    error(client.post("/api/me/nickname", json={"nickname": "a"}), "INVALID_NICKNAME")
+    chosen = ok(client.post("/api/me/nickname", json={"nickname": "  내별명  "}))
+    assert chosen["nickname"] == "내별명" and chosen["needs_nickname"] is False
+    assert ok(client.get("/api/state"))["needs_nickname"] is False
+    error(client.post("/api/me/nickname", json={"nickname": "다른별명"}), "NICKNAME_LOCKED")
+    assert ok(booth.submit(client))["attempt_no"] == 1
+    assert ok(client.get("/api/scoreboard"))["rankings"][0]["nickname"] == "내별명"
+    # guests choose their nickname when joining, not through this endpoint
+    guest = booth.guest()
+    error(guest.post("/api/me/nickname", json={"nickname": "새손님별명"}), "FORBIDDEN")
+    error(TestClient(booth.app).post("/api/me/nickname", json={"nickname": "로그인안함"}), "UNAUTHORIZED")
 
 
 def test_verified_email_cannot_be_rebound_to_another_google_sub(booth):
@@ -160,10 +188,10 @@ def test_legacy_migration_preserves_attempts_rewards_and_revokes_old_cookie(boot
     before = ok(legacy.get("/api/scoreboard"))
     assert "예전미인증실명" not in json.dumps(before, ensure_ascii=False)
     assert before["rankings"][0]["nickname"] == "예전공개별명"
-    verified, response = booth.student(name="학교에서받은이름", student_id="00-000")
+    verified, response = booth.student(name="학교에서받은이름", student_id="00-000", nickname="새학생별명")
     result = ok(response)
     assert result["participant_id"] == participant_id
-    assert result["nickname"] == "학교에서받은이름"
+    assert result["nickname"] == "새학생별명"
     assert result["attempts_left"] == 2
     history = ok(verified.get("/api/me/submissions"))["items"]
     assert history[0]["id"] == submitted["id"]
@@ -172,12 +200,13 @@ def test_legacy_migration_preserves_attempts_rewards_and_revokes_old_cookie(boot
     error(legacy.get("/api/me/submissions"), "UNAUTHORIZED")
     assert ok(booth.submit(verified))["attempt_no"] == 2
     after = ok(verified.get("/api/scoreboard"))
-    assert after["rankings"][0]["nickname"] == "학교에서받은이름"
+    assert after["rankings"][0]["nickname"] == "새학생별명"
     claims = ok(booth.admin.get("/api/admin/claims"))["items"]
-    assert claims[0]["nickname"] == "학교에서받은이름"
+    assert claims[0]["nickname"] == "새학생별명"
     people = ok(booth.admin.get("/api/admin/participants"))["items"]
-    assert people[0]["nickname"] == "학교에서받은이름"
+    assert people[0]["nickname"] == "새학생별명"
     dumped = json.dumps([after, claims, people], ensure_ascii=False)
+    assert "학교에서받은이름" not in dumped
     assert "00-000" not in dumped and "ksa.hs.kr" not in dumped
     assert "google-sub-" not in dumped
 
@@ -230,7 +259,7 @@ def test_guest_reentry_cannot_reset_attempts_or_extend_session(booth):
 
 def test_frozen_rank_names_refresh_and_hide_without_identity_export(booth):
     booth.open()
-    student, response = booth.student(name="첫등록이름")
+    student, response = booth.student(name="첫등록이름", nickname="명예별명")
     participant_id = ok(response)["participant_id"]
     ok(booth.submit(student))
     ok(booth.admin.post("/api/admin/booth", json={"action": "CLOSE"}))
@@ -238,7 +267,8 @@ def test_frozen_rank_names_refresh_and_hide_without_identity_export(booth):
     _, response = booth.student(name="바뀐등록이름")
     ok(response)
     current = ok(student.get("/api/hall?scope=DAY1"))
-    assert current["rankings"][0]["nickname"] == "바뀐등록이름"
+    assert current["rankings"][0]["nickname"] == "명예별명"
+    assert "첫등록이름" not in json.dumps(current, ensure_ascii=False) and "바뀐등록이름" not in json.dumps(current, ensure_ascii=False)
     assert current["rankings"][0]["submission_id"] == frozen["rankings"][0]["submission_id"]
     assert current["rankings"][0]["points"] == frozen["rankings"][0]["points"]
     # The route is operational anonymous JSON, not a credentials backup.

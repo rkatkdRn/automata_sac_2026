@@ -110,6 +110,9 @@ def create_app():
         data=s.logout(player(request),request.cookies.get(s.GOOGLE_CHALLENGE_COOKIE))
         response=JSONResponse(data);response.delete_cookie(s.COOKIE,path='/');response.delete_cookie(s.GOOGLE_CHALLENGE_COOKIE,path='/');return response
 
+    @app.post('/api/me/nickname')
+    def set_nickname(request:Request,payload:dict=Body(...)):return s.set_nickname(limited(request),payload)
+
     @app.get('/api/state')
     def state(request:Request):return s.state(player(request))
 
