@@ -3,7 +3,7 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 export const itemNames = { MYCHEW: '마이쮸', SESAME: '참깨 크래커', ACE: '에이스' };
 export const escapeHTML = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 export function allocation(strategy = []) {
-  return `<div class="allocation" aria-label="${strategy.map((n,i) => `${i+1}전선 ${Number(n)}명`).join(', ')}">${strategy.map((n,i) => `<span style="--lane-color:var(--lane-${i+1})"><small>${i+1}전선</small>${Number(n)}</span>`).join('')}</div>`;
+  return `<div class="allocation" aria-label="${strategy.map((n,i) => `${i+1}전선 ${Number(n)}명`).join(', ')}">${strategy.map((n,i) => `<span style="--amount:${(1-Math.exp(-Math.max(Number(n)||0,0)/30)).toFixed(3)}"><small>${i+1}전선</small>${Number(n)}</span>`).join('')}</div>`;
 }
 const errorMessages = {
   INVALID_STRATEGY: '각 전선에 0 이상의 정수를 입력하고 합을 101명으로 맞춰 주세요.',
@@ -297,7 +297,7 @@ async function boot(){
   $('#privacy-link').onclick=privacyDialog;setInterval(tickClocks,1000);
   try{
     const route=location.pathname;
-    if(route.startsWith('/admin')){currentView='admin';const module=await import('/admin.js?v=test-mode-20261027-r2');await module.mountAdmin(app);return;}
+    if(route.startsWith('/admin')){currentView='admin';const module=await import('/admin.js?v=test-mode-20261029-r3');await module.mountAdmin(app);return;}
     if(route==='/board'){renderBoard(await api('/api/scoreboard'));startLive();try{await navigator.wakeLock?.request('screen');}catch{}return;}
     state=await api('/api/state');
     if(route==='/hall'){hallScope=state.test_mode?'DAY1':`DAY${state.day_no||1}`;await loadHall();startLive();return;}
