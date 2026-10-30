@@ -27,7 +27,7 @@ async function request(path, body, options={}) {
 }
 
 export async function mountAdmin(container) {
-  if(!document.querySelector('link[data-blotto-admin]')){const link=document.createElement('link');link.rel='stylesheet';link.href='/admin.css?v=midnight-20261030-r21';link.dataset.blottoAdmin='1';document.head.append(link);}
+  if(!document.querySelector('link[data-blotto-admin]')){const link=document.createElement('link');link.rel='stylesheet';link.href='/admin.css?v=hall-20261030-r22';link.dataset.blottoAdmin='1';document.head.append(link);}
   document.title='운영 콘솔 · Colonel Blotto';
   const initial=location.hash.slice(1);
   const s={section:TITLES[initial]?initial:'overview',dashboard:null,extra:{},pending:false,loadId:0,claimStatus:'ALL',claimSearch:'',participantSearch:'',subDay:'',subSearch:'',subSort:'TIME',suggested:null,thresholdSource:'MANUAL',timer:null,lastUpdated:null};
