@@ -163,13 +163,9 @@ def pending(c):
 
 def schedule(day):
     if is_test(day): return True,None
-    t=now(); date=day['date']; sessions=json.loads(day['sessions_json']); local=t.strftime('%H:%M')
-    within=t.date().isoformat()==date and any(start<=local<end for start,end in sessions)
-    upcoming=[]
-    for start,_ in sessions:
-        v=datetime.fromisoformat(date+'T'+start).replace(tzinfo=ZoneInfo('Asia/Seoul'))
-        if v>t: upcoming.append(v.isoformat())
-    return within,min(upcoming) if upcoming else None
+    # Hours are ignored: a day runs on its whole date, 00:00-24:00 Seoul time (stored sessions are kept, unused).
+    t=now(); start=datetime.fromisoformat(day['date']).replace(tzinfo=ZoneInfo('Asia/Seoul'))
+    return t.date().isoformat()==day['date'],start.isoformat() if start>t else None
 
 def state_in(c, token=None):
     day=get_day(c); person=participant(c,token,False); count=0
@@ -462,10 +458,9 @@ def claim(token,entitlement_id,payload):
 PUBLIC_BOARD=('day_no','booth_state','mychew_left','pool_size','today_count','near_cut','day_end','last_day','updated_at','version','test_mode')
 
 def day_end(day):
-    """End of the day's last session in Seoul time; the board shows its end-of-day banner from then on."""
+    """Midnight (Seoul) after the day's date; the board shows its end-of-day banner from then on."""
     if is_test(day): return None
-    end=max(e for _,e in json.loads(day['sessions_json']))
-    return datetime.fromisoformat(day['date']+'T'+end).replace(tzinfo=ZoneInfo('Asia/Seoul')).isoformat()
+    return (datetime.fromisoformat(day['date']).replace(tzinfo=ZoneInfo('Asia/Seoul'))+timedelta(days=1)).isoformat()
 
 def board(full=False):
     data=board_full()

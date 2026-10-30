@@ -174,20 +174,15 @@ def test_T06_threshold_changes_mid_day_apply_to_later_plays_only(booth):
     assert any(a["action"] == "THRESHOLD_SET" and a["reason"] == "기준 완화" for a in ok(booth.admin.get("/api/admin/audit"))["items"])
 
 
-def test_T06b_hours_change_after_opening_and_board_day_end(booth):
+def test_T06b_day_runs_until_midnight_ignoring_hours(booth):
     booth.open(1200, mode="LIVE")
-    assert ok(booth.admin.get("/api/scoreboard"))["day_end"] == "2026-10-30T17:00:00+09:00"
-    body = {"day_no": 1, "date": "2026-10-30", "sessions": [["10:00", "13:00"], ["14:00", "17:30"]],
-        "mychew_cap_cum": 188, "premium_cap_cum": 40, "close_rule": "EITHER", "reason": "종료 시각 연장"}
-    ok(booth.admin.post("/api/admin/day-config", json=body))
     board = ok(booth.admin.get("/api/scoreboard"))
-    assert board["day_end"] == "2026-10-30T17:30:00+09:00" and board["last_day"] is False
-    # Only the hours may change once the day has opened.
-    response = booth.admin.post("/api/admin/day-config", json={**body, "premium_cap_cum": 39})
-    assert response.status_code == 409 and response.json()["error"]["code"] == "CONFIG_LOCKED"
-    booth.clock[0] = booth.clock[0].replace(hour=17, minute=10)
-    assert ok(booth.admin.get("/api/state"))["open_now"]
-    booth.clock[0] = booth.clock[0].replace(hour=17, minute=30)
+    assert board["day_end"] == "2026-10-31T00:00:00+09:00" and board["last_day"] is False
+    # Stored hours (10-13, 14-17) no longer matter: lunch time and the evening stay open.
+    for hour, minute in ((13, 30), (17, 30), (23, 59)):
+        booth.clock[0] = booth.clock[0].replace(hour=hour, minute=minute)
+        assert ok(booth.admin.get("/api/state"))["open_now"]
+    booth.clock[0] = booth.clock[0].replace(hour=0, minute=0) + timedelta(days=1)
     assert not ok(booth.admin.get("/api/state"))["open_now"]
 
 
