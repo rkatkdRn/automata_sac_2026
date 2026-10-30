@@ -459,7 +459,13 @@ def claim(token,entitlement_id,payload):
 
 # The public board hides the winners (top 10, cycle, recent allocations) so players cannot copy them;
 # it shows counts and the near-cut samples. Staff see the full board through the admin API.
-PUBLIC_BOARD=('day_no','booth_state','mychew_left','pool_size','today_count','near_cut','updated_at','version','test_mode')
+PUBLIC_BOARD=('day_no','booth_state','mychew_left','pool_size','today_count','near_cut','day_end','last_day','updated_at','version','test_mode')
+
+def day_end(day):
+    """End of the day's last session in Seoul time; the board shows its end-of-day banner from then on."""
+    if is_test(day): return None
+    end=max(e for _,e in json.loads(day['sessions_json']))
+    return datetime.fromisoformat(day['date']+'T'+end).replace(tzinfo=ZoneInfo('Asia/Seoul')).isoformat()
 
 def board(full=False):
     data=board_full()
@@ -476,12 +482,12 @@ def board_full():
     with db.transaction() as c:
         version=int(db.config(c,'version','0')); test=is_test(get_day(c))
         cached=json.loads(db.config(c,cache_key('board_cache',test),'{}'))
-        if cached.get('version')==version and 'near_cut' in cached:
+        if cached.get('version')==version and 'day_end' in cached:
             return cached
     with db.transaction(write=True) as c:
         version=int(db.config(c,'version','0')); day=get_day(c); test=is_test(day)
         cached=json.loads(db.config(c,cache_key('board_cache',test),'{}'))
-        if cached.get('version')==version and 'near_cut' in cached:
+        if cached.get('version')==version and 'day_end' in cached:
             return cached
         rows=pool_rows(c,test=test); analysis=analysis_in(c,rows,test); ranked=engine.rank_rows(rows,analysis=analysis)
         cycle=json.loads(db.config(c,cache_key('cycle',test),'null')); cycle_at=db.config(c,cache_key('cycle_at',test),'')
@@ -496,7 +502,7 @@ def board_full():
                 recent.append({'nickname':row['nickname'],'strategy':row['strategy'],'win_rate':row['points']/(2*row['opponents']) if row['opponents'] else 0,'submitted_at':row['submitted_at']})
                 if len(recent)==6: break
         data={'rankings':ranked[:10],'cycle':cycle,'recent':recent,'day_no':day['day_no'],'booth_state':day['booth_state'],
-            'mychew_left':max(0,day['mychew_cap_cum']-counters(c,test)['mychew_used']),'pool_size':len(rows),'today_count':today_count(c,day['day_no']),'near_cut':near_cut(c,rows,analysis,day['day_no']),'updated_at':stamp(),'version':int(db.config(c,'version','0')),'test_mode':test}
+            'mychew_left':max(0,day['mychew_cap_cum']-counters(c,test)['mychew_used']),'pool_size':len(rows),'today_count':today_count(c,day['day_no']),'near_cut':near_cut(c,rows,analysis,day['day_no']),'day_end':day_end(day),'last_day':day['day_no']==max(REAL_DAYS),'updated_at':stamp(),'version':int(db.config(c,'version','0')),'test_mode':test}
         db.set_config(c,cache_key('board_cache',test),dumps(data))
         return data
 
@@ -558,7 +564,9 @@ def configure_day(token,payload):
     need(rule in ('EITHER','PREMIUM_SOFT'),'INVALID_INPUT','마감 규칙을 확인해 주세요.',400)
     with db.transaction(write=True) as c:
         require_admin(c,token); day=c.one('SELECT * FROM day_config WHERE day_no=?',(day_no,))
-        need(is_test(day) or not day['ever_opened'],'CONFIG_LOCKED','개장한 운영일의 설정은 바꿀 수 없어요.')
+        # Once a real day has opened only its hours may change (e.g. closing earlier or later than planned).
+        if not is_test(day) and day['ever_opened']:
+            need(date==day['date'] and chew==day['mychew_cap_cum'] and premium==day['premium_cap_cum'] and rule==day['close_rule'],'CONFIG_LOCKED','개장한 운영일은 운영 시간만 바꿀 수 있어요.')
         other=[] if is_test(day) else c.all('SELECT * FROM day_config WHERE day_no!=? AND day_no!=?',(day_no,TEST_DAY))
         for d in other:
             if d['day_no']<day_no: need(d['mychew_cap_cum']<=chew and d['premium_cap_cum']<=premium,'INVALID_CAP','누적 상한은 전날보다 작을 수 없어요.',400)

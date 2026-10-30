@@ -174,6 +174,23 @@ def test_T06_threshold_changes_mid_day_apply_to_later_plays_only(booth):
     assert any(a["action"] == "THRESHOLD_SET" and a["reason"] == "기준 완화" for a in ok(booth.admin.get("/api/admin/audit"))["items"])
 
 
+def test_T06b_hours_change_after_opening_and_board_day_end(booth):
+    booth.open(1200, mode="LIVE")
+    assert ok(booth.admin.get("/api/scoreboard"))["day_end"] == "2026-10-30T17:00:00+09:00"
+    body = {"day_no": 1, "date": "2026-10-30", "sessions": [["10:00", "13:00"], ["14:00", "17:30"]],
+        "mychew_cap_cum": 188, "premium_cap_cum": 40, "close_rule": "EITHER", "reason": "종료 시각 연장"}
+    ok(booth.admin.post("/api/admin/day-config", json=body))
+    board = ok(booth.admin.get("/api/scoreboard"))
+    assert board["day_end"] == "2026-10-30T17:30:00+09:00" and board["last_day"] is False
+    # Only the hours may change once the day has opened.
+    response = booth.admin.post("/api/admin/day-config", json={**body, "premium_cap_cum": 39})
+    assert response.status_code == 409 and response.json()["error"]["code"] == "CONFIG_LOCKED"
+    booth.clock[0] = booth.clock[0].replace(hour=17, minute=10)
+    assert ok(booth.admin.get("/api/state"))["open_now"]
+    booth.clock[0] = booth.clock[0].replace(hour=17, minute=30)
+    assert not ok(booth.admin.get("/api/state"))["open_now"]
+
+
 @pytest.mark.parametrize("rule", ["EITHER", "PREMIUM_SOFT"])
 def test_T07_last_premium_concurrent_requests_serialized(booth, rule):
     booth.configure(premium=1, rule=rule)
