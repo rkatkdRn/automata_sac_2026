@@ -520,7 +520,7 @@ def dashboard_in(c):
         'seed_count':c.scalar('SELECT COUNT(*) FROM submissions WHERE is_seed=1'),'participant_count':c.scalar('SELECT COUNT(*) FROM participants'),
         'submission_count':c.scalar(f'SELECT COUNT(*) FROM submissions WHERE is_seed=0 AND {pool_scope(test)}'),
         'today_submissions':c.scalar('SELECT COUNT(*) FROM submissions WHERE is_seed=0 AND day_no=?',(day['day_no'],)),
-        'threshold_bp':threshold(c,day['day_no']),'pass_mode':(pass_rule(c,day['day_no']) or (None,))[0],'threshold_locked':not test and bool(day['ever_opened'] or day['threshold_applied']),
+        'threshold_bp':threshold(c,day['day_no']),'pass_mode':(pass_rule(c,day['day_no']) or (None,))[0],'threshold_locked':False,
         'threshold_applied':bool(day['threshold_applied']),'purged':db.config(c,'purged')=='true','db_mode':'postgresql' if c.postgres else 'sqlite',
         'test_mode':test,'test_day':TEST_DAY,'test_submissions':c.scalar('SELECT COUNT(*) FROM submissions WHERE day_no=?',(TEST_DAY,))}
 
@@ -603,7 +603,7 @@ def set_threshold(token,payload):
     need(source in ('MANUAL','SUGGESTION'),'INVALID_INPUT','설정 출처를 확인해 주세요.',400)
     with db.transaction(write=True) as c:
         require_admin(c,token); day=get_day(c)
-        need(is_test(day) or (not day['ever_opened'] and day['booth_state']=='CLOSED' and not day['threshold_applied']),'THRESHOLD_LOCKED','임계값은 개장 전 한 번만 적용할 수 있어요.')
+        # Changeable at any time, even mid-day: each play keeps the rule it was judged by (threshold_bp_used).
         c.execute('INSERT INTO threshold_history(id,day_no,value_bp,source,reason,set_by,set_at,mode) VALUES(?,?,?,?,?,?,?,?)',(uid(),day['day_no'],value,source,reason,'ADMIN',stamp(),mode))
         c.execute('UPDATE day_config SET threshold_applied=1 WHERE day_no=?',(day['day_no'],))
         audit(c,'THRESHOLD_SET',reason,{'mode':mode,'value_bp':value,'day_no':day['day_no'],'source':source}); db.bump(c)

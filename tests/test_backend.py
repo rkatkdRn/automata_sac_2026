@@ -153,14 +153,25 @@ def test_T04_T05_T13_one_attempt_next_day_and_self_exclusion(booth):
     assert again["opponents"] == 50 and again["pool_size"] == 52
 
 
-def test_T06_threshold_locks_after_any_open_even_close(booth):
-    booth.open()
-    body = {"value_bp": 7100, "source": "MANUAL", "reason": "다시 변경 시도"}
-    error(booth.admin.post("/api/admin/threshold", json=body), "THRESHOLD_LOCKED")
-    ok(booth.admin.post("/api/admin/booth", json={"action": "PAUSE"}))
-    error(booth.admin.post("/api/admin/threshold", json=body), "THRESHOLD_LOCKED")
+def test_T06_threshold_changes_mid_day_apply_to_later_plays_only(booth):
+    booth.open(196, mode="LIVE")
+    # WIN is 1st of 51 = top 1.97%: misses a 1.96% cut.
+    first = ok(booth.submit(booth.guest("변경전"), WIN))
+    assert first["reward"]["kind"] == "BASIC" and first["threshold_bp_used"] == 196
+    booth.clock[0] += timedelta(minutes=5)
+    ok(booth.admin.post("/api/admin/threshold", json={"mode": "LIVE", "value_bp": 1200, "reason": "기준 완화"}))
+    dashboard = ok(booth.admin.get("/api/admin/dashboard"))
+    assert dashboard["threshold_bp"] == 1200 and not dashboard["threshold_locked"]
+    second = ok(booth.submit(booth.guest("변경후"), WIN))
+    assert second["reward"]["kind"] == "TOP_CHOICE" and second["threshold_bp_used"] == 1200
+    # The earlier play keeps the rule it was judged by.
+    log = {r["nickname"]: r for r in ok(booth.admin.get("/api/admin/submissions"))["items"]}
+    assert log["변경전"]["entitlement"]["kind"] == "BASIC"
     ok(booth.admin.post("/api/admin/booth", json={"action": "CLOSE"}))
-    error(booth.admin.post("/api/admin/threshold", json=body), "THRESHOLD_LOCKED")
+    booth.clock[0] += timedelta(minutes=5)
+    ok(booth.admin.post("/api/admin/threshold", json={"mode": "LIVE", "value_bp": 1000, "reason": "마감 후 변경"}))
+    assert ok(booth.admin.get("/api/admin/dashboard"))["threshold_bp"] == 1000
+    assert any(a["action"] == "THRESHOLD_SET" and a["reason"] == "기준 완화" for a in ok(booth.admin.get("/api/admin/audit"))["items"])
 
 
 @pytest.mark.parametrize("rule", ["EITHER", "PREMIUM_SOFT"])
