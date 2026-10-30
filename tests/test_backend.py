@@ -349,8 +349,9 @@ def test_T16_top10_student_names_without_email_and_purge(booth):
         ok(booth.submit(client))
     ok(booth.admin.post("/api/admin/booth", json={"action": "CLOSE"}))
     hall = ok(booth.admin.post("/api/admin/freeze", json={"scope": "DAY1"}))
-    # All 12 tie, so none passes the cut and the three shown are the first three.
-    assert hall["mode"] == "NEAR_CUT" and [x["rank"] for x in hall["rankings"]] == [1, 2, 3]
+    assert [x["rank"] for x in hall["rankings"]] == list(range(1, 11))
+    # Winners are named, but their strategies stay secret.
+    assert all(set(x) == {"rank", "nickname", "win_rate"} for x in hall["rankings"])
     assert "학생별명" in json.dumps(hall, ensure_ascii=False)
     assert "학교실명" not in json.dumps(hall, ensure_ascii=False)
     assert all(f'"26-{i:03d}"' not in json.dumps(hall, ensure_ascii=False) for i in range(12))
@@ -763,7 +764,7 @@ def test_public_board_hides_strategies_and_result_shows_place_in_pool(booth):
     assert full["rankings"][0]["nickname"] == "숨김일등" and full["rankings"][0]["strategy"] == WIN
 
 
-def test_day_hall_shows_three_plays_just_under_the_cut_not_the_winners(booth):
+def test_live_board_shows_ten_plays_just_under_the_cut_not_the_winners(booth):
     from server import db, service
     booth.open(1200, mode="LIVE")
     rng = random.Random(42)
@@ -771,19 +772,18 @@ def test_day_hall_shows_three_plays_just_under_the_cut_not_the_winners(booth):
         cuts = sorted(rng.sample(range(102), 4))
         strategy = [b - a for a, b in zip([0] + cuts, cuts + [101])]
         ok(booth.submit(booth.guest(f"사다리{i:02d}"), strategy))
-    ok(booth.admin.post("/api/admin/booth", json={"action": "CLOSE"}))
-    hall = ok(booth.admin.post("/api/admin/freeze", json={"scope": "DAY1"}))
-    assert hall["mode"] == "NEAR_CUT" and hall["cut_bp"] == 1200 and hall["target_bp"] == 1500
+    near = ok(booth.client().get("/api/scoreboard"))["near_cut"]
+    assert near["mode"] == "LIVE" and near["cut_bp"] == 1200 and near["target_bp"] == 1500
     with db.transaction() as c:
         rows = service.pool_rows(c)
         analysis = service.analysis_in(c, rows)
-    share = {r["id"]: service.top_share_bp(rows, analysis, r["id"]) for r in rows if not r["is_seed"]}
-    shown = [r["submission_id"] for r in hall["rankings"]]
-    assert len(shown) == 3 and all(share[i] > 1200 for i in shown)
-    assert [r["top_bp"] for r in hall["rankings"]] == [share[i] for i in shown]
-    # Nobody under the cut who is left out sits closer to 15% than the farthest one shown.
-    farthest = max(abs(share[i] - 1500) for i in shown)
-    assert all(abs(v - 1500) >= farthest for i, v in share.items() if v > 1200 and i not in shown)
-    # Winners (inside the cut) are never shown.
-    assert any(v <= 1200 for v in share.values())
-    assert ok(booth.client().get("/api/hall?scope=DAY1")) == hall
+    share = sorted(service.top_share_bp(rows, analysis, r["id"]) for r in rows)
+    samples = near["samples"]
+    assert len(samples) == 10 and all(x["top_bp"] > 1200 for x in samples)
+    assert [x["top_bp"] for x in samples] == sorted(x["top_bp"] for x in samples)
+    # Nobody under the cut who is left out sits closer to 15% than the farthest sample shown.
+    farthest = max(abs(x["top_bp"] - 1500) for x in samples)
+    left_out = list(share)
+    for x in samples: left_out.remove(x["top_bp"])
+    assert all(abs(v - 1500) >= farthest for v in left_out if v > 1200)
+    assert any(v <= 1200 for v in share)  # winners exist and are never shown

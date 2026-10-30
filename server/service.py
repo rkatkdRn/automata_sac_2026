@@ -457,9 +457,9 @@ def claim(token,entitlement_id,payload):
         close_if_cap(c,day);db.bump(c)
         return {'status':'CLAIMED','choice':choice,'claimed_at':claimed_at,'code':e['code'],'entitlement_id':e['id']}
 
-# The public board hides every strategy and ranking (top 10, cycle, recent allocations) so players
-# cannot copy winners; it shows only counts. Staff see the full board through the admin API.
-PUBLIC_BOARD=('day_no','booth_state','mychew_left','pool_size','today_count','updated_at','version','test_mode')
+# The public board hides the winners (top 10, cycle, recent allocations) so players cannot copy them;
+# it shows counts and the near-cut samples. Staff see the full board through the admin API.
+PUBLIC_BOARD=('day_no','booth_state','mychew_left','pool_size','today_count','near_cut','updated_at','version','test_mode')
 
 def board(full=False):
     data=board_full()
@@ -476,12 +476,12 @@ def board_full():
     with db.transaction() as c:
         version=int(db.config(c,'version','0')); test=is_test(get_day(c))
         cached=json.loads(db.config(c,cache_key('board_cache',test),'{}'))
-        if cached.get('version')==version and 'today_count' in cached:
+        if cached.get('version')==version and 'near_cut' in cached:
             return cached
     with db.transaction(write=True) as c:
         version=int(db.config(c,'version','0')); day=get_day(c); test=is_test(day)
         cached=json.loads(db.config(c,cache_key('board_cache',test),'{}'))
-        if cached.get('version')==version and 'today_count' in cached:
+        if cached.get('version')==version and 'near_cut' in cached:
             return cached
         rows=pool_rows(c,test=test); analysis=analysis_in(c,rows,test); ranked=engine.rank_rows(rows,analysis=analysis)
         cycle=json.loads(db.config(c,cache_key('cycle',test),'null')); cycle_at=db.config(c,cache_key('cycle_at',test),'')
@@ -496,19 +496,19 @@ def board_full():
                 recent.append({'nickname':row['nickname'],'strategy':row['strategy'],'win_rate':row['points']/(2*row['opponents']) if row['opponents'] else 0,'submitted_at':row['submitted_at']})
                 if len(recent)==6: break
         data={'rankings':ranked[:10],'cycle':cycle,'recent':recent,'day_no':day['day_no'],'booth_state':day['booth_state'],
-            'mychew_left':max(0,day['mychew_cap_cum']-counters(c,test)['mychew_used']),'pool_size':len(rows),'today_count':today_count(c,day['day_no']),'updated_at':stamp(),'version':int(db.config(c,'version','0')),'test_mode':test}
+            'mychew_left':max(0,day['mychew_cap_cum']-counters(c,test)['mychew_used']),'pool_size':len(rows),'today_count':today_count(c,day['day_no']),'near_cut':near_cut(c,rows,analysis,day['day_no']),'updated_at':stamp(),'version':int(db.config(c,'version','0')),'test_mode':test}
         db.set_config(c,cache_key('board_cache',test),dumps(data))
         return data
 
 def hall_in(c,scope):
     need(scope in ('DAY1','DAY2','DAY3','OVERALL'),'INVALID_SCOPE','순위 범위를 확인해 주세요.',400)
     row=c.one('SELECT * FROM rank_freeze WHERE scope=?',(scope,))
-    if not row: return {'scope':scope,'frozen':False,'frozen_at':None,'mode':'TOP' if scope=='OVERALL' else 'NEAR_CUT','cut_bp':None,'target_bp':None,'rankings':[]}
+    if not row: return {'scope':scope,'frozen':False,'frozen_at':None,'rankings':[]}
     rankings=json.loads(row['rankings_json'])
     people={r['id']:display_name(r) for r in c.all('SELECT p.id,p.nickname,p.name_hidden,p.real_name,p.kind,p.nickname_chosen,i.google_sub AS verified_school_subject FROM participants p LEFT JOIN school_identities i ON i.participant_id=p.id')}
     for rank in rankings: rank['nickname']=people.get(rank['participant_id'],'익명 전술가')
-    near=scope!='OVERALL' and bool(rankings) and 'cut_bp' in rankings[0]
-    return {'scope':scope,'frozen':True,'frozen_at':row['frozen_at'],'mode':'NEAR_CUT' if near else 'TOP','cut_bp':rankings[0]['cut_bp'] if near else None,'target_bp':rankings[0]['target_bp'] if near else None,'rankings':rankings}
+    # The Hall of Fame names the winners but keeps their strategies secret: nickname and win rate only.
+    return {'scope':scope,'frozen':True,'frozen_at':row['frozen_at'],'rankings':[{'rank':r['rank'],'nickname':r['nickname'],'win_rate':r['win_rate']} for r in rankings]}
 
 def hall(scope):
     with db.transaction() as c: return hall_in(c,scope)
@@ -783,21 +783,19 @@ def freeze(token,payload):
         day_no=3 if scope=='OVERALL' else int(scope[-1]);day=c.one('SELECT * FROM day_config WHERE day_no=?',(day_no,))
         need(day['ever_opened'] and day['booth_state'] in ('DONE','CAP_REACHED'),'BOOTH_NOT_CLOSED','해당 운영일을 마감한 뒤 확정해 주세요.')
         if scope=='OVERALL':need(int(db.config(c,'active_day'))==3,'INVALID_DAY','종합 순위는 3일차에 확정해 주세요.')
-        rows=pool_rows(c);analysis=analysis_in(c,rows);when=stamp()
-        if scope=='OVERALL':ranking=engine.rank_rows(rows,analysis=analysis)[:10]
-        else:ranking=near_cut(c,rows,analysis,engine.rank_rows(rows,scope_day=day_no,analysis=analysis),day_no)
+        rows=pool_rows(c);ranking=engine.rank_rows(rows,scope_day=None if scope=='OVERALL' else day_no,analysis=analysis_in(c,rows))[:10];when=stamp()
         c.execute('INSERT INTO rank_freeze(scope,rankings_json,frozen_at) VALUES(?,?,?)',(scope,dumps(ranking),when))
         if scope!='OVERALL':c.execute('UPDATE day_config SET frozen_at=? WHERE day_no=?',(when,day_no))
         audit(c,'RANK_FREEZE',details={'scope':scope});db.bump(c)
         return hall_in(c,scope)
 
-# A day's Hall of Fame never shows the winners: it shows three plays from that day just under the
-# snack cutline (cut + 3%p of the whole pool), a hint that does not hand the next day a winner to copy.
+# The live board never shows the winners: it shows the 10 plays in the pool (seeds included) just
+# under today's snack cutline, closest to cut + 3%p (cut 12% -> around 15%). A hint, not a winner to copy.
 NEAR_CUT_BP=300
 
-def near_cut(c, rows, analysis, ranked, day_no):
+def near_cut(c, rows, analysis, day_no, count=10):
     rule=pass_rule(c,day_no)
-    if not rule or not ranked: return []
+    if not rule or not rows: return None
     mode,value=rule
     rates=sorted(engine.rate_fraction(analysis[r['id']]) for r in rows)
     def share(rate):  # rounded-up top share, ties in the player's favour (same as top_share_bp)
@@ -805,9 +803,12 @@ def near_cut(c, rows, analysis, ranked, day_no):
     if mode=='LIVE': cut=value
     else: cut=-(-sum(1 for r in rows if engine.qualified(analysis[r['id']]['points'],analysis[r['id']]['opponents'],value))*10000//len(rows))
     target=cut+NEAR_CUT_BP
-    for r in ranked: r.update(top_bp=share(engine.rate_fraction(analysis[r['submission_id']])),cut_bp=cut,target_bp=target)
-    picked=sorted((r for r in ranked if r['top_bp']>cut),key=lambda r:(abs(r['top_bp']-target),r['rank']))[:3]
-    return sorted(picked,key=lambda r:r['rank'])
+    samples=[]
+    for r in rows:
+        result=analysis[r['id']];bp=share(engine.rate_fraction(result))
+        if bp>cut: samples.append({'nickname':r['nickname'],'is_seed':bool(r['is_seed']),'strategy':r['strategy'],'top_bp':bp,'win_rate':result['win_rate'],'submitted_at':r['submitted_at']})
+    samples=sorted(samples,key=lambda x:(abs(x['top_bp']-target),x['submitted_at']))[:count]
+    return {'mode':mode,'cut_bp':cut,'target_bp':target,'samples':sorted(samples,key=lambda x:(x['top_bp'],x['submitted_at']))}
 
 def audits(token):
     with db.transaction() as c:

@@ -280,8 +280,7 @@ def test_frozen_rank_names_stay_nicknames_and_hide_without_identity_export(booth
     current = ok(student.get("/api/hall?scope=DAY1"))
     assert current["rankings"][0]["nickname"] == "명예별명"
     assert "첫등록이름" not in json.dumps(current, ensure_ascii=False) and "바뀐등록이름" not in json.dumps(current, ensure_ascii=False)
-    assert current["rankings"][0]["submission_id"] == frozen["rankings"][0]["submission_id"]
-    assert current["rankings"][0]["points"] == frozen["rankings"][0]["points"]
+    assert current["rankings"] == frozen["rankings"] and "strategy" not in current["rankings"][0]
     # The route is operational anonymous JSON, not a credentials backup.
     exported_text = json.dumps(ok(booth.admin.get("/api/admin/backup")), ensure_ascii=False)
     for private in ("첫등록이름", "바뀐등록이름", "00-000"):
